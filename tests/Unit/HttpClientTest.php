@@ -225,3 +225,118 @@ it('sends content_base64 for non-UTF-8 bytes', function () {
             && $change['content_base64'] === base64_encode($binary);
     });
 });
+
+it('creates and finds a session by ref', function () {
+    Http::fake([
+        '*/sessions?*' => Http::response([
+            'sessions' => [
+                ['id' => '01JSESSION1', 'repo' => 'acme/workspace', 'ref' => 'somebody-else', 'state' => 'open', 'base_oid' => str_repeat('a', 40), 'tip' => str_repeat('a', 40)],
+                ['id' => '01JSESSION2', 'repo' => 'acme/workspace', 'ref' => 'draft', 'state' => 'open', 'base_oid' => str_repeat('a', 40), 'tip' => str_repeat('b', 40)],
+            ],
+            'next_cursor' => null,
+        ]),
+        '*/sessions' => Http::response([
+            'session' => ['id' => '01JSESSION3', 'repo' => 'acme/workspace', 'ref' => 'draft', 'state' => 'open', 'base_oid' => str_repeat('a', 40), 'tip' => str_repeat('a', 40)],
+            'token' => ['id' => '01JTOKEN', 'token' => 'asm_tok_session'],
+        ], 201),
+    ]);
+
+    $client = httpClient();
+
+    $found = $client->findSession('acme', 'workspace', 'draft');
+    $created = $client->createSession('acme', 'workspace', 'main', 'draft');
+
+    expect($found?->id)->toBe('01JSESSION2')
+        ->and($found?->tip)->toBe(str_repeat('b', 40))
+        ->and($created->id)->toBe('01JSESSION3')
+        ->and($client->findSession('acme', 'workspace', 'nobody'))->toBeNull();
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'POST'
+        && $request->url() === 'https://source.test/v1/namespaces/acme/repos/workspace/sessions'
+        && $request['from'] === 'main'
+        && $request['ref'] === 'draft');
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'GET'
+        && str_contains($request->url(), '/sessions?ref=draft'));
+});
+
+it('turns a 409 merge_conflict into a MergeConflict with the payload intact', function () {
+    $path = 'notes/plan.md';
+
+    $payload = [
+        'merge_id' => '01JMERGE',
+        'session' => '01JSESSION',
+        'target' => 'main',
+        'target_oid' => str_repeat('a', 40),
+        'session_oid' => str_repeat('b', 40),
+        'merge_base_oid' => str_repeat('c', 40),
+        'conflicts' => [[
+            'path' => $path,
+            'kind' => 'content',
+            'base' => ['oid' => str_repeat('d', 40), 'mode' => '100644'],
+            'ours' => ['oid' => str_repeat('e', 40), 'mode' => '100644'],
+            'theirs' => ['oid' => str_repeat('f', 40), 'mode' => '100644'],
+            'hunks' => [],
+        ]],
+        'resolution' => [
+            'strategy' => 'per_path',
+            'accepts' => ['ours', 'theirs', 'content', 'delete'],
+            'default_side_of_ours' => 'target',
+        ],
+    ];
+
+    Http::fake(['*' => Http::response(errorBody('merge_conflict', $payload, 'Merge produced 1 conflict.'), 409)]);
+
+    try {
+        httpClient()->merge('acme', 'workspace', '01JSESSION', 'main');
+
+        $this->fail('A conflict was accepted as a clean merge.');
+    } catch (MergeConflict $e) {
+        expect($e->errorCode)->toBe('merge_conflict')
+            ->and($e->paths())->toBe([$path])
+            ->and($e->mergeId())->toBe('01JMERGE')
+            ->and($e->sessionId())->toBe('01JSESSION')
+            ->and($e->target())->toBe('main')
+            ->and($e->details)->toBe($payload);
+    }
+});
+
+it('resolves every conflicted path in one call', function () {
+    Http::fake(['*' => Http::response(['merge' => ['id' => '01JMERGE', 'state' => 'resolved', 'target' => 'main']])]);
+
+    $client = httpClient();
+
+    $merge = $client->resolveMerge('acme', 'workspace', '01JSESSION', '01JMERGE', [
+        'ours.md' => 'ours',
+        'theirs.md' => 'theirs',
+        'gone.md' => 'delete',
+        'merged.md' => "hand written\n",
+        'binary.bin' => "\x00\xff",
+    ]);
+
+    expect($merge->state)->toBe('resolved');
+
+    Http::assertSent(function (Request $request) {
+        return $request->method() === 'POST'
+            && $request->url() === 'https://source.test/v1/namespaces/acme/repos/workspace/sessions/01JSESSION/merges/01JMERGE/resolve'
+            && $request['paths'] === [
+                ['path' => 'ours.md', 'resolution' => 'ours'],
+                ['path' => 'theirs.md', 'resolution' => 'theirs'],
+                ['path' => 'gone.md', 'resolution' => 'delete'],
+                ['path' => 'merged.md', 'resolution' => 'content', 'content' => "hand written\n"],
+                ['path' => 'binary.bin', 'resolution' => 'content', 'content_base64' => base64_encode("\x00\xff")],
+            ];
+    });
+});
+
+it('aborts a merge with its merge id', function () {
+    Http::fake(['*' => Http::response(['session' => ['id' => '01JSESSION', 'ref' => 'draft', 'state' => 'open']])]);
+
+    $session = httpClient()->abortMerge('acme', 'workspace', '01JSESSION', '01JMERGE');
+
+    expect($session->state)->toBe('open');
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'POST'
+        && $request->url() === 'https://source.test/v1/namespaces/acme/repos/workspace/sessions/01JSESSION/abort'
+        && $request['merge_id'] === '01JMERGE');
+});

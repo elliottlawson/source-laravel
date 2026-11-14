@@ -59,6 +59,20 @@ final class Backends
     }
 
     /**
+     * A second repo in the same namespace, for the repo() isolation test.
+     *
+     * The fake always has one. The live run needs SOURCE_TEST_REPO_OTHER,
+     * because creating a repo is an operator-scoped call and the conformance
+     * token is a repo token.
+     */
+    public static function otherRepo(): ?string
+    {
+        $repo = env('SOURCE_TEST_REPO_OTHER');
+
+        return is_string($repo) && $repo !== '' ? $repo : null;
+    }
+
+    /**
      * @return array{0: SourceFilesystem, 1: SourceFilesystem, 2: string}
      */
     public static function make(TestCase $test, string $backend): array
