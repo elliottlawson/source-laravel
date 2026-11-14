@@ -140,6 +140,21 @@ class SourceFilesystem extends FilesystemAdapter
      * a failed plain put should surface FileChanged, not UnableToWriteFile.
      */
 
+    public function exists($path)
+    {
+        return $this->surface(fn () => parent::exists($path));
+    }
+
+    public function fileExists($path)
+    {
+        return $this->surface(fn () => parent::fileExists($path));
+    }
+
+    public function directoryExists($path)
+    {
+        return $this->surface(fn () => parent::directoryExists($path));
+    }
+
     public function put($path, $contents, $options = [])
     {
         return $this->surface(fn () => parent::put($path, $contents, $options));
@@ -162,7 +177,9 @@ class SourceFilesystem extends FilesystemAdapter
 
     public function delete($paths)
     {
-        return $this->surface(fn () => parent::delete($paths));
+        $arguments = func_get_args();
+
+        return $this->surface(fn () => parent::delete(...$arguments));
     }
 
     public function copy($from, $to)

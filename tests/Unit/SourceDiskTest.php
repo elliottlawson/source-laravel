@@ -284,6 +284,17 @@ it('passes author and meta through commit()', function () {
         ->and($commit['author']->name)->toBe('Elliott');
 });
 
+it('deletes several paths in one call', function () {
+    $disk = fakeDisk();
+
+    $disk->put('a.md', "a\n");
+    $disk->put('b.md', "b\n");
+
+    expect($disk->delete('a.md', 'b.md'))->toBeTrue()
+        ->and($disk->fileExists('a.md'))->toBeFalse()
+        ->and($disk->fileExists('b.md'))->toBeFalse();
+});
+
 it('deletes a whole directory in one commit', function () {
     $disk = fakeDisk();
 
