@@ -2,7 +2,9 @@
 
 declare(strict_types=1);
 
+use Source\Change;
 use Source\Exceptions\StagingFull;
+use Source\Exceptions\UnknownObject;
 use Source\Source;
 use Source\Support\Payload;
 
@@ -36,6 +38,28 @@ it('treats a staged blob as present in its own repo only', function () {
         ->and($again->existing)->toBeTrue()
         ->and($fake->hasReusedBlob($oid))->toBeTrue()
         ->and($fake->blobUploadCount())->toBe(2);
+});
+
+it('refuses an oid change in another repo and after the grace period', function () {
+    $fake = Source::fake();
+    $contents = 'cross-repo bytes';
+    $oid = Payload::blobOid($contents);
+
+    $fake->uploadBlob('acme', 'workspace', Payload::from($contents), $oid);
+
+    // One repo only: the same oid in another repo is unknown (api.md 3.4.5).
+    expect(fn () => $fake->sendChanges('acme', 'other', 'main', 'Elsewhere', null, [
+        Change::reference('copy.bin', '', $oid),
+    ]))->toThrow(UnknownObject::class);
+
+    // Expiry drops it from objects/present and from the commit's allowed set.
+    $fake->expireUploads();
+
+    expect($fake->presentObjects('acme', 'workspace', [$oid]))->toBe([]);
+
+    expect(fn () => $fake->sendChanges('acme', 'workspace', 'main', 'Expired', null, [
+        Change::reference('copy.bin', '', $oid),
+    ]))->toThrow(UnknownObject::class);
 });
 
 it('uploads a large file, names it in one commit and consumes the staging row', function () {
