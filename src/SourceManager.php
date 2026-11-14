@@ -12,7 +12,10 @@ use PHPUnit\Framework\Assert as PHPUnit;
 use Source\Flysystem\SourceAdapter;
 use Source\Http\Client;
 use Source\Http\HttpClient;
+use Source\Operator\HttpOperatorClient;
+use Source\Operator\OperatorClient;
 use Source\Testing\FakeClient;
+use Source\Testing\FakeOperator;
 use Throwable;
 
 /**
@@ -22,6 +25,8 @@ use Throwable;
 class SourceManager
 {
     protected ?FakeClient $fake = null;
+
+    protected ?FakeOperator $fakeOperator = null;
 
     protected ?Closure $authorResolver = null;
 
@@ -64,6 +69,30 @@ class SourceManager
     }
 
     /**
+     * The operator calls: namespaces, repos and token minting.
+     *
+     * Needs `url` and `operator_key`. Under fake() it returns the in-memory
+     * operator, which lives and dies with the fake.
+     *
+     * @param  array<string, mixed>  $config
+     */
+    public function operator(array $config = []): OperatorClient
+    {
+        if ($this->fake !== null) {
+            return $this->fakeOperator ??= new FakeOperator;
+        }
+
+        return new HttpOperatorClient($config);
+    }
+
+    public function fakeOperator(): FakeOperator
+    {
+        $this->fakeOrFail();
+
+        return $this->fakeOperator ??= new FakeOperator;
+    }
+
+    /**
      * Swap the transport for an in-memory server that follows the same rules.
      *
      * Calling it twice returns the same fake: a disk resolved after the first
@@ -87,6 +116,7 @@ class SourceManager
     public function restore(): void
     {
         $this->fake = null;
+        $this->fakeOperator = null;
         $this->forgetSourceDisks();
     }
 

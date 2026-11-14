@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Source\Http;
 
+use GuzzleHttp\Psr7\StreamWrapper;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
@@ -569,6 +570,23 @@ final class HttpClient implements Client
         $this->ensureSuccess($response);
 
         return Session::fromArray((array) ($response->json('session') ?? []));
+    }
+
+    /**
+     * The body is streamed (Guzzle's `stream` option), so a large blob costs
+     * a buffer, not its size.
+     */
+    public function object(string $namespace, string $repo, string $oid)
+    {
+        $response = $this->request('application/octet-stream')
+            ->withOptions(['stream' => true])
+            ->get($this->url('namespaces/'.rawurlencode($namespace)
+                .'/repos/'.rawurlencode($repo)
+                .'/objects/'.rawurlencode($oid)));
+
+        $this->ensureSuccess($response);
+
+        return StreamWrapper::getResource($response->toPsrResponse()->getBody());
     }
 
     /**
