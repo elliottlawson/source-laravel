@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Source\Support;
 
+use GuzzleHttp\Psr7\Stream;
 use GuzzleHttp\Psr7\Utils;
 use InvalidArgumentException;
 use Psr\Http\Message\StreamInterface;
@@ -170,8 +171,6 @@ final class Payload
     /**
      * The body for one HTTP attempt: a string, or a stream Guzzle can send
      * without holding the file.
-     *
-     * @return string|StreamInterface
      */
     public function body(): string|StreamInterface
     {
@@ -257,7 +256,7 @@ final class Payload
 
         // A resource was handed in: keep the resource itself, so the wrapper
         // can be detached after each attempt.
-        $resource = $stream instanceof \GuzzleHttp\Psr7\Stream ? $stream->detach() : null;
+        $resource = $stream instanceof Stream ? $stream->detach() : null;
 
         return is_resource($resource)
             ? new self(null, $resource, null, $size)
@@ -295,7 +294,7 @@ final class Payload
      */
     private static function detach(StreamInterface $stream)
     {
-        $resource = $stream instanceof \GuzzleHttp\Psr7\Stream ? $stream->detach() : null;
+        $resource = $stream instanceof Stream ? $stream->detach() : null;
 
         if (is_resource($resource)) {
             return $resource;

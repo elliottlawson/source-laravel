@@ -925,7 +925,8 @@ final class FakeClient implements Client
                 "Simulate change to {$path}",
                 new Author('someone else', 'someone@example.com'),
                 [Change::put($path, $existing === null ? '' : self::oid($existing), $new)],
-            );        }
+            );
+        }
 
         return $this;
     }

@@ -28,6 +28,11 @@ final class OidWhenPresent implements Uploader
 
     public function __construct(private readonly Client $client) {}
 
+    /**
+     * @param  list<Change>  $changes
+     * @param  array<string, true>  $forceInline
+     * @return list<Change>
+     */
     public function prepare(string $namespace, string $repo, string $ref, array $changes, array $forceInline = []): array
     {
         $wanted = [];

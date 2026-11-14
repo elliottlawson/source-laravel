@@ -50,7 +50,7 @@ it('commits a change by oid when the repo already holds the blob', function () {
     $bodies = [];
     $present = [];
 
-    Http::fake(function (Request $request) use (&$bodies, &$present, $oid, $unchanged) {
+    Http::fake(function (Request $request) use (&$bodies, &$present, $oid) {
         if ($request->method() === 'HEAD') {
             // Both files exist at the versions the driver read.
             $path = str_contains($request->url(), 'a.md') ? 'a.md' : 'b.md';
@@ -130,7 +130,7 @@ it('resends the bytes once when the server answers unknown_object', function () 
 
     $commits = [];
 
-    Http::fake(function (Request $request) use (&$commits, $oid, $contents) {
+    Http::fake(function (Request $request) use (&$commits, $oid) {
         if ($request->method() === 'HEAD') {
             return Http::response('', 200, [
                 'X-Object-Oid' => $oid,

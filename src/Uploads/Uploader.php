@@ -39,9 +39,9 @@ interface Uploader
      *
      * @param  list<Change>  $changes
      * @param  array<string, true>  $forceInline  paths whose bytes must travel
-     *                                             inline even if the server
-     *                                             could take an oid (the
-     *                                             `422 unknown_object` fallback)
+     *                                            inline even if the server
+     *                                            could take an oid (the
+     *                                            `422 unknown_object` fallback)
      * @return list<Change>
      */
     public function prepare(string $namespace, string $repo, string $ref, array $changes, array $forceInline = []): array;
