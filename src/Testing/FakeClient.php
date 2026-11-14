@@ -6,6 +6,7 @@ namespace Source\Testing;
 
 use Closure;
 use Source\Author;
+use Source\BlobUpload;
 use Source\Change;
 use Source\ChangedBy;
 use Source\Commit;
@@ -19,6 +20,8 @@ use Source\Exceptions\Conflict;
 use Source\Exceptions\FileChanged;
 use Source\Exceptions\MergeConflict;
 use Source\Exceptions\NotFound;
+use Source\Exceptions\OidMismatch;
+use Source\Exceptions\StagingFull;
 use Source\Exceptions\UnknownObject;
 use Source\Exceptions\UploadsBusy;
 use Source\Exceptions\ValidationFailed;
@@ -30,6 +33,7 @@ use Source\Session;
 use Source\SourceFile;
 use Source\Support\Payload;
 use Source\TreeEntry;
+use Source\Uploads\PendingBlob;
 
 /**
  * An in-memory `source` server that follows the same rules as the real one.
@@ -50,17 +54,35 @@ use Source\TreeEntry;
  * streamed PUT (it hashes the payload as Git does and counts the bytes as
  * uploaded), `sendChanges()` is the batch commit with inline bytes or `oid`
  * references. `presentObjects()` answers like the server: a blob the repo holds
- * from any commit it has recorded. A commit naming a blob it does not hold is a
+ * from any commit it has recorded, or one uploaded to it through `/blobs` whose
+ * grace period has not run out. A commit naming a blob it does not hold is a
  * `422 unknown_object`, and `simulateBusy()` makes the next writes answer `429
  * uploads_busy` so the client's back-off can be tested.
+ *
+ * Blob uploads (api.md 3.4.5) follow the server too: `uploadBlob()` stores the
+ * bytes without committing anything, identical bytes are idempotent, an upload
+ * counts for one repo only, and it stops counting when its grace period ends
+ * (`expireUploads()`). `simulateStagingFull()` answers `409 staging_full` and
+ * `simulateBusy()` covers the `429` case, so both client paths are testable.
  */
 final class FakeClient implements Client
 {
+    /**
+     * A staged blob's grace period, in fake seconds (the server's default).
+     */
+    public const UPLOAD_GRACE = 86_400;
+
     /** @var array<string, array<string, string>> repo key => path => contents */
     private array $files = [];
 
     /** @var array<string, array<string, string>> repo => blob oid => contents */
     private array $blobs = [];
+
+    /** @var array<string, array<string, array{contents: string, expires: int}>> repo => oid => staged upload */
+    private array $staged = [];
+
+    /** @var list<array{repo: string, oid: string, size: int, stored: bool}> */
+    private array $blobUploads = [];
 
     /** @var array<string, list<int>> path => sizes of raw PUTs that carried it */
     private array $uploads = [];
@@ -113,6 +135,13 @@ final class FakeClient implements Client
     private int $busy = 0;
 
     private int $busyRetryAfter = 1;
+
+    /**
+     * How many more blob upload attempts answer 409 staging_full.
+     */
+    private int $stagingFull = 0;
+
+    private string $stagingScope = 'repo';
 
     private readonly Backoff $backoff;
 
@@ -288,14 +317,31 @@ final class FakeClient implements Client
             );
         }
 
-        // A named blob must be one this repo holds (api.md 3.4.3). Nothing is
-        // written when any is unknown, and every refused path is listed.
-        $held = $this->blobs[$namespace.'/'.$repo] ?? [];
+        // A named blob must be one this repo holds (api.md 3.4.3): reachable
+        // from a commit, or uploaded through /blobs and still inside its grace
+        // period (3.4.5). Nothing is written when any is unknown, and every
+        // refused path is listed.
+        $repoName = $namespace.'/'.$repo;
+        $held = $this->blobs[$repoName] ?? [];
+
+        foreach (array_keys($this->staged[$repoName] ?? []) as $stagedOid) {
+            $upload = $this->stagedHeld($repoName, $stagedOid);
+
+            if ($upload !== null) {
+                $held[$stagedOid] = $upload['contents'];
+            }
+        }
+
         $unknown = [];
+        $referenced = [];
 
         foreach ($changes as $change) {
             if ($change->isReference() && ! isset($held[(string) $change->oid])) {
                 $unknown[] = ['path' => $change->path, 'oid' => (string) $change->oid];
+            }
+
+            if ($change->isReference()) {
+                $referenced[] = (string) $change->oid;
             }
         }
 
@@ -332,6 +378,12 @@ final class FakeClient implements Client
             files: $next,
             log: $changes,
         );
+
+        // A commit has named these blobs: they are ordinary reachable objects
+        // now, and the grace period no longer applies (api.md 3.4.5).
+        foreach ($referenced as $oid) {
+            unset($this->staged[$repoName][$oid]);
+        }
 
         $files = [];
 
@@ -399,7 +451,8 @@ final class FakeClient implements Client
      */
     public function presentObjects(string $namespace, string $repo, array $oids): array
     {
-        $held = $this->blobs[$namespace.'/'.$repo] ?? [];
+        $repoName = $namespace.'/'.$repo;
+        $held = $this->blobs[$repoName] ?? [];
 
         $present = [];
         $seen = [];
@@ -411,12 +464,111 @@ final class FakeClient implements Client
 
             $seen[$oid] = true;
 
-            if (isset($held[$oid])) {
+            if (isset($held[$oid]) || $this->stagedHeld($repoName, $oid) !== null) {
                 $present[] = $oid;
             }
         }
 
         return $present;
+    }
+
+    /**
+     * One blob upload (api.md 3.4.5): bytes now, commit later.
+     *
+     * Nothing is committed and no ref moves. Identical bytes are idempotent
+     * (the same oid, nothing new stored, the grace period restarted); an upload
+     * counts for this repo only; and `X-Source-Oid` is checked against the
+     * bytes, exactly as the server does.
+     */
+    public function uploadBlob(string $namespace, string $repo, Payload $payload, ?string $oid = null): BlobUpload
+    {
+        $this->busyCheck();
+
+        if ($this->stagingFull > 0) {
+            $this->stagingFull--;
+
+            throw new StagingFull(
+                'Uploaded-but-uncommitted bytes would exceed the staging cap.',
+                [
+                    'scope' => $this->stagingScope,
+                    'limit_bytes' => 2 << 30,
+                    'staged_bytes' => 2 << 30,
+                    'next_expiry_at' => gmdate('Y-m-d\TH:i:s.000\Z', $this->clock + self::UPLOAD_GRACE),
+                ],
+            );
+        }
+
+        $contents = $payload->contents();
+        $actual = self::oid($contents);
+
+        if ($oid !== null && $oid !== $actual) {
+            throw new OidMismatch(
+                'The uploaded bytes do not hash to X-Source-Oid.',
+                ['expected_oid' => $oid, 'actual_oid' => $actual],
+            );
+        }
+
+        $repoName = $namespace.'/'.$repo;
+        $size = strlen($contents);
+
+        if (isset($this->blobs[$repoName][$actual])) {
+            $this->blobUploads[] = ['repo' => $repoName, 'oid' => $actual, 'size' => $size, 'stored' => false];
+
+            return new BlobUpload(
+                $actual,
+                $size,
+                gmdate('Y-m-d\TH:i:s.000\Z', $this->clock + self::UPLOAD_GRACE),
+                existing: true,
+            );
+        }
+
+        $staged = $this->stagedHeld($repoName, $actual);
+
+        if ($staged !== null) {
+            $this->staged[$repoName][$actual]['expires'] = $this->clock + self::UPLOAD_GRACE;
+            $this->blobUploads[] = ['repo' => $repoName, 'oid' => $actual, 'size' => $size, 'stored' => false];
+
+            return new BlobUpload(
+                $actual,
+                $size,
+                gmdate('Y-m-d\TH:i:s.000\Z', $this->staged[$repoName][$actual]['expires']),
+                existing: true,
+            );
+        }
+
+        $this->staged[$repoName][$actual] = [
+            'contents' => $contents,
+            'expires' => $this->clock + self::UPLOAD_GRACE,
+        ];
+        $this->blobUploads[] = ['repo' => $repoName, 'oid' => $actual, 'size' => $size, 'stored' => true];
+
+        return new BlobUpload(
+            $actual,
+            $size,
+            gmdate('Y-m-d\TH:i:s.000\Z', $this->clock + self::UPLOAD_GRACE),
+        );
+    }
+
+    /**
+     * One pooled wave of blob uploads; a failure is its Throwable, as the real
+     * transport returns it, so the client can retry only that blob.
+     *
+     * @param  list<PendingBlob>  $blobs
+     * @return array<string, BlobUpload|\Throwable>
+     */
+    public function uploadBlobs(string $namespace, string $repo, array $blobs, int $concurrency = 4): array
+    {
+        $results = [];
+
+        foreach ($blobs as $blob) {
+            try {
+                $results[$blob->key] = $this->uploadBlob($namespace, $repo, $blob->payload, $blob->oid);
+            } catch (\Throwable $e) {
+                $results[$blob->key] = $e;
+            }
+        }
+
+        return $results;
     }
 
     /**
@@ -432,6 +584,70 @@ final class FakeClient implements Client
         $this->busyRetryAfter = max(1, $retryAfter);
 
         return $this;
+    }
+
+    /**
+     * Answer the next `$times` blob uploads with 409 staging_full (api.md
+     * 3.4.5). A staging cap is a wait-for-commits-or-expiry condition, not a
+     * 429, so the client must not retry it.
+     */
+    public function simulateStagingFull(int $times = 1, string $scope = 'repo'): static
+    {
+        $this->stagingFull = max(0, $times);
+        $this->stagingScope = $scope === 'server' ? 'server' : 'repo';
+
+        return $this;
+    }
+
+    /**
+     * End every staged upload's grace period now.
+     *
+     * This is what the server's 24-hour expiry does: the blobs stop answering
+     * `objects/present` and a commit naming one is `422 unknown_object`, so the
+     * client uploads the bytes again. The live server cannot expire on demand,
+     * which is why only the fake has this.
+     */
+    public function expireUploads(): static
+    {
+        $this->staged = [];
+
+        return $this;
+    }
+
+    /**
+     * Whether a blob with this oid was ever uploaded through /blobs.
+     */
+    public function hasBlobUploaded(string $oid): bool
+    {
+        foreach ($this->blobUploads as $upload) {
+            if ($upload['oid'] === $oid) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * How many blob upload requests the fake answered.
+     */
+    public function blobUploadCount(): int
+    {
+        return count($this->blobUploads);
+    }
+
+    /**
+     * The oid was already held when the upload arrived (a 200, not a 201).
+     */
+    public function hasReusedBlob(string $oid): bool
+    {
+        foreach ($this->blobUploads as $upload) {
+            if ($upload['oid'] === $oid && ! $upload['stored']) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -1559,6 +1775,32 @@ final class FakeClient implements Client
     private function key(string $namespace, string $repo, string $ref): string
     {
         return "{$namespace}/{$repo}@{$ref}";
+    }
+
+    /**
+     * A staged upload of this blob, if the grace period has not run out.
+     *
+     * `expireUploads()` clears every row; this also drops a row whose time has
+     * passed, so a test that advances the fake's clock gets the same answer the
+     * server would give.
+     *
+     * @return array{contents: string, expires: int}|null
+     */
+    private function stagedHeld(string $repoName, string $oid): ?array
+    {
+        $row = $this->staged[$repoName][$oid] ?? null;
+
+        if ($row === null) {
+            return null;
+        }
+
+        if ($row['expires'] <= $this->clock) {
+            unset($this->staged[$repoName][$oid]);
+
+            return null;
+        }
+
+        return $row;
     }
 
     /**

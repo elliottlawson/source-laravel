@@ -4,10 +4,13 @@ declare(strict_types=1);
 
 namespace Source\Http;
 
+use Closure;
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\Pool;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Source\Author;
+use Source\BlobUpload;
 use Source\Change;
 use Source\Commit;
 use Source\CommitPage;
@@ -16,6 +19,7 @@ use Source\CommittedFile;
 use Source\Diff;
 use Source\DiffFile;
 use Source\DiffHunk;
+use Source\Exceptions\OidMismatch;
 use Source\Exceptions\SourceException;
 use Source\FileStat;
 use Source\MergeResult;
@@ -32,11 +36,20 @@ final class HttpClient implements Client
     private readonly Backoff $backoff;
 
     /**
-     * @param  array{url?: string, token?: string, timeout?: int|float, upload_timeout?: int|float}  $config
+     * Runs a pool callback: the one seam a test needs to watch concurrency.
+     *
+     * @var Closure(callable, int): array
      */
-    public function __construct(private readonly array $config, ?Backoff $backoff = null)
+    private readonly Closure $pool;
+
+    /**
+     * @param  array{url?: string, token?: string, timeout?: int|float, upload_timeout?: int|float}  $config
+     * @param  (Closure(callable, int): array)|null  $pool  replaces Http::pool, for tests
+     */
+    public function __construct(private readonly array $config, ?Backoff $backoff = null, ?Closure $pool = null)
     {
         $this->backoff = $backoff ?? new Backoff;
+        $this->pool = $pool ?? static fn (callable $callback, int $concurrency): array => Http::pool($callback, $concurrency);
     }
 
     public function head(string $namespace, string $repo, string $ref, string $path): ?FileStat
@@ -260,6 +273,147 @@ final class HttpClient implements Client
         }
 
         return $present;
+    }
+
+    /**
+     * One blob upload (api.md 3.4.5).
+     *
+     * Streamed, never buffered. `X-Source-Oid` is the oid we computed; the
+     * server hashes the same bytes and refuses a mismatch, and the answer is
+     * checked against it too. `Expect: 100-continue` lets a refusal (`403`,
+     * `413`, `429`, `staging_full`, or "already held") arrive before the body.
+     *
+     * No `Idempotency-Key`, for the same reason as `putFile()`: the upload is
+     * idempotent by content, and a key would make the server read the body
+     * before it could refuse a busy upload.
+     */
+    public function uploadBlob(string $namespace, string $repo, Payload $payload, ?string $oid = null): BlobUpload
+    {
+        $payload->rewind();
+
+        try {
+            $response = $this->blobRequest($this->request(upload: true), $payload, $oid)
+                ->send('POST', $this->blobUrl($namespace, $repo));
+        } finally {
+            // Guzzle must not close a stream the caller still owns.
+            $payload->release();
+        }
+
+        $this->ensureSuccess($response);
+
+        return $this->blobResult($response, $oid);
+    }
+
+    /**
+     * One pooled wave of blob uploads (api.md 3.4.5).
+     *
+     * `Http::pool` is curl multi underneath, so the bodies are in flight at the
+     * same time rather than one after another. The pool's concurrency is the
+     * caller's decision (`AdaptiveConcurrency`), and every request uses the
+     * upload timeout and the same headers as `uploadBlob()`.
+     */
+    public function uploadBlobs(string $namespace, string $repo, array $blobs, int $concurrency = 4): array
+    {
+        if ($blobs === []) {
+            return [];
+        }
+
+        $url = $this->blobUrl($namespace, $repo);
+
+        $callback = function (Pool $pool) use ($blobs, $url): void {
+            foreach ($blobs as $blob) {
+                $blob->payload->rewind();
+
+                $this->blobRequest($this->configure($pool->as($blob->key), upload: true), $blob->payload, $blob->oid)
+                    ->send('POST', $url);
+            }
+        };
+
+        try {
+            $results = ($this->pool)($callback, max(1, $concurrency));
+        } finally {
+            foreach ($blobs as $blob) {
+                $blob->payload->release();
+            }
+        }
+
+        $uploads = [];
+
+        foreach ($blobs as $blob) {
+            $result = $results[$blob->key] ?? null;
+
+            if ($result instanceof Response) {
+                try {
+                    $this->ensureSuccess($result);
+                    $uploads[$blob->key] = $this->blobResult($result, $blob->oid);
+                } catch (SourceException $e) {
+                    $uploads[$blob->key] = $e;
+                }
+
+                continue;
+            }
+
+            $uploads[$blob->key] = $result instanceof \Throwable
+                ? $result
+                : new SourceException('The blob upload returned no response.', 'transport_error');
+        }
+
+        return $uploads;
+    }
+
+    /**
+     * The headers and body of one blob upload. The body is the file itself.
+     */
+    private function blobRequest(PendingRequest $request, Payload $payload, ?string $oid): PendingRequest
+    {
+        $headers = ['Content-Length' => (string) $payload->size()];
+
+        if ($oid !== null) {
+            $headers['X-Source-Oid'] = $oid;
+        }
+
+        return $request
+            ->accept('application/json')
+            ->withHeaders($headers)
+            // Guzzle's own `expect` option, so curl waits for 100-continue
+            // before sending the body and a refused upload costs no bytes.
+            ->withOptions(['expect' => true])
+            ->withBody($payload->body(), 'application/octet-stream');
+    }
+
+    /**
+     * The `{oid, size, expires_at}` body of a successful upload.
+     */
+    private function blobResult(Response $response, ?string $expected): BlobUpload
+    {
+        $oid = (string) $response->json('oid');
+
+        if ($expected !== null && $oid !== $expected) {
+            throw new OidMismatch(
+                'The server returned a different oid than the bytes were hashed to.',
+                ['expected_oid' => $expected, 'actual_oid' => $oid],
+            );
+        }
+
+        if ($oid === '') {
+            throw new SourceException('The blob upload response did not carry an oid.', 'transport_error');
+        }
+
+        $expires = $response->json('expires_at');
+
+        return new BlobUpload(
+            oid: $oid,
+            size: (int) $response->json('size'),
+            expiresAt: is_string($expires) && $expires !== '' ? $expires : null,
+            existing: $response->status() === 200,
+        );
+    }
+
+    private function blobUrl(string $namespace, string $repo): string
+    {
+        return $this->url('namespaces/'.rawurlencode($namespace)
+            .'/repos/'.rawurlencode($repo)
+            .'/blobs');
     }
 
     /**
@@ -630,16 +784,20 @@ final class HttpClient implements Client
 
     private function request(string $accept = 'application/json', bool $upload = false): PendingRequest
     {
-        $request = Http::accept($accept)
-            ->timeout($this->timeoutFor($upload));
+        return $this->configure(Http::accept($accept), $upload);
+    }
+
+    /**
+     * The settings every request carries: the timeout (uploads get their own)
+     * and the bearer token.
+     */
+    private function configure(PendingRequest $request, bool $upload = false): PendingRequest
+    {
+        $request = $request->timeout($this->timeoutFor($upload));
 
         $token = (string) ($this->config['token'] ?? '');
 
-        if ($token !== '') {
-            $request = $request->withToken($token);
-        }
-
-        return $request;
+        return $token !== '' ? $request->withToken($token) : $request;
     }
 
     private function ensureSuccess(Response $response): void

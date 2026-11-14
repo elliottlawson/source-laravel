@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Source\Http;
 
 use Source\Author;
+use Source\BlobUpload;
 use Source\Change;
 use Source\Commit;
 use Source\CommitPage;
@@ -16,6 +17,7 @@ use Source\Session;
 use Source\SourceFile;
 use Source\Support\Payload;
 use Source\TreeEntry;
+use Source\Uploads\PendingBlob;
 
 /**
  * The transport: everything the driver needs from the `source` API.
@@ -91,6 +93,33 @@ interface Client
      * @return list<string>
      */
     public function presentObjects(string $namespace, string $repo, array $oids): array;
+
+    /**
+     * Upload one blob without committing it (api.md 3.4.5).
+     *
+     * The payload is the request body and streams: it is never buffered. `$oid`
+     * is the Git blob id the caller computed; the server hashes the bytes again
+     * and refuses a mismatch with `422 oid_mismatch` (which maps to
+     * OidMismatch). A `200` or `201` both mean success.
+     *
+     * One attempt only. `429 uploads_busy` is handled by the caller
+     * (`ParallelBlobUploads`), which owns the concurrency and the wave-wide
+     * `Retry-After`; retrying here would hide the back-pressure from it.
+     */
+    public function uploadBlob(string $namespace, string $repo, Payload $payload, ?string $oid = null): BlobUpload;
+
+    /**
+     * Upload several blobs concurrently with one pool (api.md 3.4.5).
+     *
+     * Results are keyed by `PendingBlob::$key`. A failed upload appears as the
+     * Throwable it threw rather than aborting the whole pool, so the caller can
+     * retry only the refused ones. One attempt each, for the same reason as
+     * `uploadBlob()`.
+     *
+     * @param  list<PendingBlob>  $blobs
+     * @return array<string, BlobUpload|\Throwable>
+     */
+    public function uploadBlobs(string $namespace, string $repo, array $blobs, int $concurrency = 4): array;
 
     /**
      * One page of the commit log, newest first.

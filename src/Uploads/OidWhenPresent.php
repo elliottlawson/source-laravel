@@ -16,8 +16,11 @@ use Source\Http\Client;
  *
  * The answer is a hint — a blob present now can be collected later — so a
  * commit that names one may still be refused with `422 unknown_object`; the
- * driver answers that by preparing again with those paths forced inline. See
- * `Uploader` for what replaces this once `POST /blobs` exists.
+ * driver answers that by preparing again with those paths forced inline.
+ *
+ * `ParallelBlobUploads` is the default now that `POST /blobs` exists (api.md
+ * 3.4.5); this class remains for callers that would rather send every missing
+ * file inline than make an upload request per file.
  */
 final class OidWhenPresent implements Uploader
 {
@@ -30,15 +33,15 @@ final class OidWhenPresent implements Uploader
 
     /**
      * @param  list<Change>  $changes
-     * @param  array<string, true>  $forceInline
+     * @param  array<string, true>  $forceUpload
      * @return list<Change>
      */
-    public function prepare(string $namespace, string $repo, string $ref, array $changes, array $forceInline = []): array
+    public function prepare(string $namespace, string $repo, string $ref, array $changes, array $forceUpload = []): array
     {
         $wanted = [];
 
         foreach ($changes as $change) {
-            if ($change->isDelete() || $change->isReference() || isset($forceInline[$change->path])) {
+            if ($change->isDelete() || $change->isReference() || isset($forceUpload[$change->path])) {
                 continue;
             }
 

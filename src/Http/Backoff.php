@@ -61,6 +61,17 @@ final class Backoff
         }
     }
 
+    /**
+     * Wait out a delay chosen elsewhere, with the same cap as a `429` retry.
+     *
+     * A parallel uploader has several refusals in one wave but waits once, for
+     * the largest `Retry-After` among them (api.md 3.4.4).
+     */
+    public function pause(int $seconds): void
+    {
+        $this->wait($seconds);
+    }
+
     private function wait(int $seconds): void
     {
         $seconds = max(1, min($seconds > 0 ? $seconds : 1, $this->maxWait));

@@ -21,6 +21,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static void assertNothingWritten(string $path)
  * @method static void assertUploaded(string $path)
  * @method static void assertReferenced(string $path)
+ * @method static void assertBlobUploaded(string $pathOrOid)
  * @method static void assertNothingCommitted()
  * @method static void assertReverted(string $commitOid)
  *

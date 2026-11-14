@@ -62,12 +62,14 @@ class SourceException extends RuntimeException
         return match (true) {
             $response->status() === 409 && $code === 'file_changed' => FileChanged::fromDetails($details, $message, $requestId),
             $response->status() === 409 && $code === 'merge_conflict' => new MergeConflict($message, $code, $details, $requestId),
+            $response->status() === 409 && $code === 'staging_full' => new StagingFull($message, $details, $requestId),
             $response->status() === 404 => new NotFound($message, $details, $requestId),
             $response->status() === 401 => new Unauthorized($message, $code, $details, $requestId),
             $response->status() === 403 => new Forbidden($message, $code, $details, $requestId),
             $response->status() === 409 => new Conflict($message, $code, $details, $requestId),
             $response->status() === 413 => new FileTooLarge($message, $details, $requestId),
             $response->status() === 422 && $code === 'unknown_object' => new UnknownObject($message, $code, $details, $requestId),
+            $response->status() === 422 && $code === 'oid_mismatch' => new OidMismatch($message, $details, $requestId),
             $response->status() === 422 => new ValidationFailed($message, $code, $details, $requestId),
             $response->status() === 429 && $code === 'uploads_busy' => new UploadsBusy(
                 $message,

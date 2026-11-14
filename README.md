@@ -38,7 +38,10 @@ history, reading the past, diffs, reverts, repos, branches and the fake.
 | `branch` | no | Defaults to `main`. |
 | `throw` | no | Defaults to **true** here, unlike Laravel's own disks. Set it to `false` for Laravel's "return false" behaviour. |
 | `timeout` | no | Request timeout in seconds. Defaults to 30. |
-| `upload_timeout` | no | Timeout in seconds for writes that carry file bytes (single-file `PUT` and batch commits). Defaults to 600. |
+| `upload_timeout` | no | Timeout in seconds for writes that carry file bytes (single-file `PUT` and blob uploads). Defaults to 600. |
+| `inline_threshold` | no | A batch change smaller than this many bytes travels inside the commit body instead of its own blob upload. Defaults to 65536 (64 KiB). |
+| `upload_concurrency` | no | Blob uploads in flight at the start of a commit. Defaults to 4. |
+| `upload_concurrency_max` | no | The most blob uploads in flight after a fast wave. Defaults to 16. |
 
 The provider registers the driver with `Storage::extend('source', ...)`; package
 discovery picks it up. The disk is a
@@ -220,7 +223,9 @@ not mutated.
 | `Source\Exceptions\Unauthorized` | 401 |
 | `Source\Exceptions\Forbidden` | 403 |
 | `Source\Exceptions\ValidationFailed` | 422 |
-| `Source\Exceptions\UnknownObject` | 422 `unknown_object` (`->paths()`), after the one retry with bytes |
+| `Source\Exceptions\UnknownObject` | 422 `unknown_object` (`->paths()`), after the one retry with fresh uploads |
+| `Source\Exceptions\OidMismatch` | 422 `oid_mismatch` (`->expectedOid`, `->actualOid`), never retried |
+| `Source\Exceptions\StagingFull` | 409 `staging_full` (`->scope`, `->limitBytes`, `->stagedBytes`, `->nextExpiryAt`), never retried |
 | `Source\Exceptions\RateLimited` | 429 `rate_limited` (`->retryAfter`) |
 | `Source\Exceptions\UploadsBusy` | 429 `uploads_busy` (`->retryAfter`, `->scope`), after the bounded retries |
 
@@ -302,10 +307,13 @@ Source::assertCommitted('Create notes/plan.md');
 Source::assertWritten('notes/plan.md');
 Source::assertUploaded('notes/plan.md');            // the bytes went as a raw PUT
 Source::assertReferenced('notes/summary.md');       // the commit named a blob instead of sending bytes
+Source::assertBlobUploaded('assets/big.bin');       // went as its own POST /blobs
 Source::assertReverted($commit);                   // a commit carried Reverts: <oid>
 
 Source::fake()->simulateChange('notes/plan.md');   // the next strict write on it throws FileChanged
 Source::fake()->simulateBusy(times: 2);            // the next two writes answer 429 uploads_busy
+Source::fake()->simulateStagingFull(times: 1);     // the next upload answers 409 staging_full
+Source::fake()->expireUploads();                   // staged blobs expire, as after the 24h grace period
 
 Sleep::fake();                                     // keep the 429 back-off instant
 ```
@@ -353,14 +361,32 @@ a message saying so.
   `X-Source-Message`. A string, a resource and a PSR-7 stream all work, and a
   file is never read into memory: `$disk->putFileAs(...)` and
   `$disk->writeStream(...)` of a large file cost a buffer, not the file size.
-- A delete, or a commit with more than one change, is one `POST /commits`. Each
-  change's bytes are hashed as a Git blob first, and one the repo already holds
-  is sent as `{path, expected_oid, oid}` instead of its bytes (api.md 3.4.3).
-  Re-committing unchanged content therefore uploads nothing.
-- Writes carry no `Idempotency-Key`: with one, the server can't refuse a stale
-  version or a busy server before reading the body. A `429` (`uploads_busy`, or
-  `rate_limited`) is refused before anything is written, and is answered by waiting `Retry-After` and sending the same
-  request again, up to four attempts; a `413` is never retried. The wait uses
-  Laravel's `Sleep`, so `Sleep::fake()` in a test makes it instant.
+- A delete, or a commit with more than one change, is one `POST /commits`. Every
+  put is hashed as a Git blob first, and `POST /objects/present` says which blobs
+  the repo already holds (in chunks of 1000). Each file at or over
+  `inline_threshold` (64 KiB) whose blob is missing is uploaded first with its
+  own `POST /blobs`, streamed and never buffered, and the commit then names it as
+  `{path, expected_oid, oid}`. A multi-file commit therefore stays one commit,
+  and its body carries only the small files: a request per tiny file costs more
+  than it saves. Re-committing unchanged content uploads nothing.
+- Blob uploads run in parallel waves: four in flight at the start, one more after
+  a faster clean wave, halved after a `429` or a transport error, sixteen at
+  most. A `429` waits for the largest `Retry-After` in the wave and retries only
+  the refused uploads, bounded, then `UploadsBusy`. A transport/5xx error retries
+  that upload, bounded. `409 staging_full` and `422 oid_mismatch` are never
+  retried: waiting or resending the same bytes cannot fix either. A stream is
+  rewound before every retry, so the second attempt sends the whole file.
+- A `422 unknown_object` on the commit means an uploaded blob expired (24 hours)
+  or GC took it in the gap; the driver uploads those paths again and retries the
+  commit once. A server that predates `POST /blobs` answers the upload with a
+  plain 404 (`details.resource: "path"`); the driver remembers that and sends
+  every later commit's bytes inline, which is the behaviour the package had
+  before the endpoint existed.
+- Writes and blob uploads carry no `Idempotency-Key`: with one, the server can't
+  refuse a stale version or a busy server before reading the body. A `429`
+  (`uploads_busy`, or `rate_limited`) is refused before anything is written, and
+  is answered by waiting `Retry-After` and sending the same request again, up to
+  four attempts; a `413` is never retried. The wait uses Laravel's `Sleep`, so
+  `Sleep::fake()` in a test makes it instant.
 - A stream handed to `put()` is detached from the HTTP client after the
   request, so the transport never closes a file the caller still owns.

@@ -19,7 +19,7 @@ use Source\Exceptions\ReadOnlyDisk;
 use Source\Exceptions\UnknownObject;
 use Source\Http\Client;
 use Source\Support\Payload;
-use Source\Uploads\OidWhenPresent;
+use Source\Uploads\ParallelBlobUploads;
 use Source\Uploads\Uploader;
 
 /**
@@ -35,8 +35,9 @@ use Source\Uploads\Uploader;
  * Every write leaves through `send()`, which picks one of the server's two write
  * paths: one file streams as the body of `PUT .../files/{ref}/{path}` (api.md
  * 3.4.2), and anything else is one all-or-nothing `POST /commits`. The batch
- * path asks the `Uploader` seam how each change's bytes travel; today that means
- * naming a blob the repo already holds instead of sending it again (3.4.3).
+ * path asks the `Uploader` seam how each change's bytes travel; by default that
+ * means uploading a missing blob to `POST /blobs` first and naming it by oid
+ * (3.4.5), so a commit never carries a large file.
  *
  * History (`history`, `at`, `diff`, `revert`) and branches (`branch`,
  * `mergeInto`) are the extras that need more than the filesystem.
@@ -77,7 +78,7 @@ class SourceStore
         protected ?string $sessionId = null,
         ?Uploader $uploader = null,
     ) {
-        $this->uploader = $uploader ?? new OidWhenPresent($client);
+        $this->uploader = $uploader ?? new ParallelBlobUploads($client);
     }
 
     public function namespace(): string
@@ -751,17 +752,19 @@ class SourceStore
      * One all-or-nothing batch commit.
      *
      * The uploader decides which changes travel by oid rather than bytes. Its
-     * answer is a hint, so a `422 unknown_object` means "send those bytes";
-     * that costs one more POST per commit, once, and is the only retry here.
+     * answer is a hint, so a `422 unknown_object` means "send those bytes
+     * again"; that costs one more prepare and POST per commit, once, and is the
+     * only retry here. For `ParallelBlobUploads` "again" means re-uploading the
+     * bytes to `/blobs`; for `OidWhenPresent` it means inline.
      *
      * @param  list<Change>  $changes
      */
     protected function sendCommit(string $message, array $changes, ?Author $author): CommitResult
     {
-        $inline = [];
+        $forceUpload = [];
 
         for ($attempt = 1; ; $attempt++) {
-            $wire = $this->uploader->prepare($this->namespace, $this->repo, $this->ref, $changes, $inline);
+            $wire = $this->uploader->prepare($this->namespace, $this->repo, $this->ref, $changes, $forceUpload);
 
             try {
                 return $this->client->sendChanges($this->namespace, $this->repo, $this->ref, $message, $author, $wire);
@@ -771,8 +774,9 @@ class SourceStore
                 }
 
                 // The repo stopped holding a blob between the hint and the
-                // write: resend those paths' bytes.
-                $inline = array_fill_keys($e->paths(), true);
+                // write (it expired, or GC took it): send those paths' bytes
+                // again.
+                $forceUpload = array_fill_keys($e->paths(), true);
             }
         }
     }

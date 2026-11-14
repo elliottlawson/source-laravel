@@ -13,6 +13,9 @@ use Source\Flysystem\SourceAdapter;
 use Source\Http\Client;
 use Source\Http\HttpClient;
 use Source\Testing\FakeClient;
+use Source\Uploads\AdaptiveConcurrency;
+use Source\Uploads\ParallelBlobUploads;
+use Source\Uploads\Uploader;
 use Throwable;
 
 /**
@@ -35,18 +38,40 @@ class SourceManager
     public function disk(array $config): SourceFilesystem
     {
         $config = $this->normalize($config);
+        $client = $this->client($config);
 
         $store = new SourceStore(
-            client: $this->client($config),
+            client: $client,
             namespace: $this->required($config, 'namespace'),
             repo: $this->required($config, 'repo'),
             ref: $config['branch'],
             authorResolver: fn (): ?Author => $this->resolveAuthor(),
+            uploader: $this->uploader($client, $config),
         );
 
         $adapter = new SourceAdapter($store);
 
         return new SourceFilesystem(new Filesystem($adapter), $adapter, $config, $store);
+    }
+
+    /**
+     * The batch-upload strategy for one disk (api.md 3.4.5).
+     *
+     * The defaults are the package's: files under 64 KiB stay inline, and the
+     * upload concurrency starts at 4 and grows to 16. A disk can tune both.
+     *
+     * @param  array<string, mixed>  $config
+     */
+    protected function uploader(Client $client, array $config): Uploader
+    {
+        return new ParallelBlobUploads(
+            client: $client,
+            inlineThreshold: (int) ($config['inline_threshold'] ?? ParallelBlobUploads::DEFAULT_INLINE_THRESHOLD),
+            concurrency: new AdaptiveConcurrency(
+                start: max(1, (int) ($config['upload_concurrency'] ?? AdaptiveConcurrency::START)),
+                max: max(1, (int) ($config['upload_concurrency_max'] ?? AdaptiveConcurrency::MAX)),
+            ),
+        );
     }
 
     /**
@@ -216,6 +241,28 @@ class SourceManager
         PHPUnit::assertTrue(
             $this->fakeOrFail()->hasReferenced($path),
             "Expected [{$path}] to be committed by oid, but its bytes were sent.",
+        );
+    }
+
+    /**
+     * Assert that a path or blob id travelled as its own `POST /blobs`
+     * (api.md 3.4.5).
+     *
+     * A path is looked up in the fake's tree, so assert after the commit that
+     * wrote it; a 40-hex id is checked as is.
+     */
+    public function assertBlobUploaded(string $pathOrOid): void
+    {
+        $fake = $this->fakeOrFail();
+
+        $oid = preg_match('/^[0-9a-f]{40}$/', $pathOrOid) === 1
+            ? $pathOrOid
+            : $fake->version($pathOrOid);
+
+        PHPUnit::assertNotNull($oid, "Expected [{$pathOrOid}] to exist in the fake before asserting its upload.");
+        PHPUnit::assertTrue(
+            $fake->hasBlobUploaded($oid),
+            "Expected [{$pathOrOid}] to be uploaded as a blob, but no POST /blobs carried it.",
         );
     }
 
