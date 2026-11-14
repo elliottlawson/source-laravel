@@ -9,6 +9,8 @@ use Illuminate\Support\Facades\Facade;
 /**
  * @method static \Source\SourceFilesystem disk(array $config)
  * @method static \Source\Http\Client client(array $config)
+ * @method static \Source\Operator\OperatorClient operator(array $config = [])
+ * @method static \Source\Testing\FakeOperator fakeOperator()
  * @method static \Source\Testing\FakeClient fake()
  * @method static bool isFaking()
  * @method static \Source\Testing\FakeClient fakeOrFail()
