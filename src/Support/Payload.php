@@ -15,15 +15,15 @@ use Throwable;
  *
  * A raw file write (api.md 3.4.2) needs three things the caller's stream may
  * not offer: a known size (for `Content-Length`, which the server requires), a
- * rewindable body (a last-write-wins retry after `409 file_changed` has to
- * send the same bytes again) and a Git blob id (to skip bytes the server
- * already holds, api.md 3.4.3). This object provides all three without ever
- * reading a stream into memory:
+ * rewindable body (a retry has to send the same bytes again) and a Git blob id
+ * (to skip bytes the server already holds, api.md 3.4.3). This object provides
+ * all three without ever reading a stream into memory:
  *
- *  - a seekable resource or stream is measured in place and streamed from its
- *    current position;
- *  - a non-seekable one is spooled once to `php://temp` (1 MiB in memory, the
- *    rest on disk), which is also what makes it rewindable;
+ *  - a stream at its first byte is measured in place and streamed as it is;
+ *  - a stream that is not at its first byte, or cannot be seeked, is spooled
+ *    once to `php://temp` (1 MiB in memory, the rest on disk), which also makes
+ *    it rewindable. The HTTP client rewinds a request body to absolute zero, so
+ *    a body that starts anywhere else has to become its own stream first;
  *  - the blob id is hashed incrementally with `hash_update_stream`.
  *
  * The body is never buffered. `contents()` exists for the in-memory fake, which
@@ -39,12 +39,13 @@ final class Payload
     private const SPOOL_MEMORY = 1_048_576;
 
     /**
-     * The stream we hand out, when it is our own wrapper around a resource.
+     * The stream we handed to the HTTP client, when it is our own wrapper
+     * around a resource.
      */
     private ?StreamInterface $wrapper = null;
 
     /**
-     * @param  string|null  $text  A string body; then `$resource` is null.
+     * @param  string|null  $text  A string body; then nothing else is set.
      * @param  resource|null  $resource  A body read from a resource.
      * @param  StreamInterface|null  $foreign  A body handed in as a PSR-7 stream.
      */
@@ -52,7 +53,6 @@ final class Payload
         private readonly ?string $text,
         private $resource,
         private readonly ?StreamInterface $foreign,
-        private readonly int $start,
         private readonly int $size,
         private ?string $oid = null,
     ) {}
@@ -64,25 +64,25 @@ final class Payload
     public static function from(mixed $contents): self
     {
         if ($contents === null) {
-            return new self('', null, null, 0, 0);
+            return new self('', null, null, 0);
         }
 
         if (is_string($contents)) {
-            return new self($contents, null, null, 0, strlen($contents));
+            return new self($contents, null, null, strlen($contents));
+        }
+
+        if ($contents instanceof StreamInterface) {
+            return self::fromStream($contents, keepStream: true);
         }
 
         if ($contents instanceof Stringable) {
             $text = (string) $contents;
 
-            return new self($text, null, null, 0, strlen($text));
-        }
-
-        if ($contents instanceof StreamInterface) {
-            return self::fromStream($contents);
+            return new self($text, null, null, strlen($text));
         }
 
         if (is_resource($contents)) {
-            return self::fromStream(Utils::streamFor($contents), streaming: true);
+            return self::fromStream(Utils::streamFor($contents));
         }
 
         throw new InvalidArgumentException('Unsupported contents: expected a string, stream or Stringable.');
@@ -121,12 +121,12 @@ final class Payload
         hash_update($hash, 'blob '.$this->size."\0");
 
         if ($this->resource !== null) {
-            $this->seek($this->resource, $this->start);
+            fseek($this->resource, 0);
             hash_update_stream($hash, $this->resource);
-            $this->seek($this->resource, $this->start);
+            fseek($this->resource, 0);
         } else {
             $stream = $this->foreign;
-            $stream->seek($this->start);
+            $stream->rewind();
 
             while (! $stream->eof()) {
                 $chunk = $stream->read(1_048_576);
@@ -138,7 +138,7 @@ final class Payload
                 hash_update($hash, $chunk);
             }
 
-            $stream->seek($this->start);
+            $stream->rewind();
         }
 
         return $this->oid = hash_final($hash);
@@ -155,17 +155,16 @@ final class Payload
         }
 
         if ($this->resource !== null) {
-            $this->seek($this->resource, $this->start);
+            fseek($this->resource, 0);
 
             $read = stream_get_contents($this->resource);
 
             return $read === false ? '' : $read;
         }
 
-        $stream = $this->foreign;
-        $stream->seek($this->start);
+        $this->foreign->rewind();
 
-        return $stream->getContents();
+        return $this->foreign->getContents();
     }
 
     /**
@@ -196,11 +195,11 @@ final class Payload
     public function rewind(): void
     {
         if ($this->resource !== null) {
-            $this->seek($this->resource, $this->start);
+            fseek($this->resource, 0);
         }
 
         if ($this->foreign !== null) {
-            $this->foreign->seek($this->start);
+            $this->foreign->rewind();
         }
     }
 
@@ -225,39 +224,49 @@ final class Payload
     }
 
     /**
-     * Measure a PSR-7 stream in place, or spool it when it cannot be rewound.
+     * Measure a stream from its first byte, or spool what cannot be sent as it
+     * is.
      */
-    private static function fromStream(StreamInterface $stream, bool $streaming = false): self
+    private static function fromStream(StreamInterface $stream, bool $keepStream = false): self
     {
-        if ($stream->isSeekable()) {
-            try {
-                $start = $stream->tell();
-                $stream->seek(0, SEEK_END);
-                $end = $stream->tell();
-                $stream->seek($start);
-            } catch (Throwable) {
+        if (! $stream->isSeekable()) {
+            return self::spool($stream);
+        }
+
+        try {
+            // The HTTP client rewinds the body to absolute zero, so a stream
+            // positioned anywhere else has to be copied first.
+            if ($stream->tell() !== 0) {
                 return self::spool($stream);
             }
 
-            if ($end >= $start) {
-                $size = $end - $start;
-
-                // A resource was handed in: keep the resource itself, so the
-                // wrapper can be detached after each attempt.
-                $resource = $streaming ? self::unwrapped($stream) : null;
-
-                return $resource === null
-                    ? new self(null, null, $stream, $start, $size)
-                    : new self(null, $resource, null, $start, $size);
-            }
+            $stream->seek(0, SEEK_END);
+            $size = $stream->tell();
+            $stream->seek(0);
+        } catch (Throwable) {
+            return self::spool($stream);
         }
 
-        return self::spool($stream);
+        if ($size < 0) {
+            return self::spool($stream);
+        }
+
+        if ($keepStream) {
+            return new self(null, null, $stream, $size);
+        }
+
+        // A resource was handed in: keep the resource itself, so the wrapper
+        // can be detached after each attempt.
+        $resource = $stream instanceof \GuzzleHttp\Psr7\Stream ? $stream->detach() : null;
+
+        return is_resource($resource)
+            ? new self(null, $resource, null, $size)
+            : self::spool($stream);
     }
 
     /**
-     * Copy a non-seekable stream to php://temp so its size is known and the
-     * body can be sent again.
+     * Copy a stream to php://temp so its size is known and the body can be
+     * sent again.
      */
     private static function spool(StreamInterface $stream): self
     {
@@ -276,32 +285,22 @@ final class Payload
         $size = $temp->tell();
         $temp->seek(0);
 
-        return new self(null, self::unwrapped($temp), null, 0, $size);
+        return new self(null, self::detach($temp), null, $size);
     }
 
     /**
-     * The resource behind a PSR-7 stream, taken without closing it.
+     * Take the resource out of one of Guzzle's streams without closing it.
      *
      * @return resource
      */
-    private static function unwrapped(StreamInterface $stream)
+    private static function detach(StreamInterface $stream)
     {
         $resource = $stream instanceof \GuzzleHttp\Psr7\Stream ? $stream->detach() : null;
 
-        if (! is_resource($resource)) {
-            // Not one of Guzzle's own streams (a PumpStream, say): read it
-            // through PHP so the payload still owns a plain resource.
-            return self::reopen($stream);
+        if (is_resource($resource)) {
+            return $resource;
         }
 
-        return $resource;
-    }
-
-    /**
-     * @return resource
-     */
-    private static function reopen(StreamInterface $stream)
-    {
         $temp = fopen('php://temp/maxmemory:'.self::SPOOL_MEMORY, 'r+');
 
         if ($temp === false) {
@@ -323,13 +322,5 @@ final class Payload
         rewind($temp);
 
         return $temp;
-    }
-
-    /**
-     * @param  resource  $resource
-     */
-    private function seek($resource, int $offset): void
-    {
-        fseek($resource, $offset);
     }
 }

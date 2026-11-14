@@ -4,11 +4,21 @@ declare(strict_types=1);
 
 namespace Source\Tests;
 
+use Illuminate\Support\Sleep;
 use Orchestra\Testbench\TestCase as Orchestra;
 use Source\SourceServiceProvider;
 
 abstract class TestCase extends Orchestra
 {
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        // Back-pressure is tested by counting waits, never by waiting. The
+        // framework's own teardown resets this, so it is set per test.
+        Sleep::fake();
+    }
+
     protected function getPackageProviders($app): array
     {
         return [SourceServiceProvider::class];
