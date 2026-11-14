@@ -124,6 +124,40 @@ the plain ones and retries the whole batch on `file_changed` only when **every**
 mismatched path was a plain change. One stale strict change refuses the batch
 and throws `FileChanged`, exactly as the server does.
 
+## Uploads
+
+A single file is a stream: its bytes are the body of a raw
+`PUT .../files/{ref}/{path}` (api.md 3.4.2), never a JSON string. A delete, or a
+commit with more than one change, takes a different path (api.md 3.4.5):
+
+1. every put is hashed as a Git blob, and `POST /objects/present` says which
+   blobs the repo already holds (in chunks of 1000);
+2. a put under `inline_threshold` (64 KiB by default) stays inline in the commit
+   body: one upload request per tiny file costs more than it saves;
+3. every other missing blob is uploaded first with its own `POST /blobs`, as a
+   streamed body with `Content-Length`, `X-Source-Oid` and
+   `Expect: 100-continue`. Uploads run in parallel waves: `upload_concurrency`
+   (4) in flight at the start, one more after a faster clean wave, halved after
+   a `429` or a transport error, `upload_concurrency_max` (16) at most;
+4. the commit then names each of them as `{path, expected_oid, oid}`. One
+   multi-file commit stays one commit, and its body carries only the small
+   files. Re-committing unchanged content over the threshold uploads no blob
+   again; a tiny file's bytes still travel inline, where they cost no extra
+   request.
+
+A `429` waits for the largest `Retry-After` in the wave and retries only the
+refused uploads, bounded, then throws `UploadsBusy`. A transport/5xx error
+retries that upload, bounded. `409 staging_full` throws `StagingFull` and
+`422 oid_mismatch` throws `OidMismatch`; neither is retried. A stream is rewound
+before every retry, so the second attempt sends the whole file.
+
+A `422 unknown_object` on the commit means an uploaded blob expired (24 hours)
+or GC took it in the gap; the driver uploads those paths again and retries the
+commit once. A server that predates `POST /blobs` answers the upload with a plain
+404 (`details.resource: "path"`); the driver remembers that and sends every later
+commit's bytes inline, which is the behaviour the package had before the
+endpoint existed.
+
 ## Who and why
 
 ```php
@@ -361,27 +395,9 @@ a message saying so.
   `X-Source-Message`. A string, a resource and a PSR-7 stream all work, and a
   file is never read into memory: `$disk->putFileAs(...)` and
   `$disk->writeStream(...)` of a large file cost a buffer, not the file size.
-- A delete, or a commit with more than one change, is one `POST /commits`. Every
-  put is hashed as a Git blob first, and `POST /objects/present` says which blobs
-  the repo already holds (in chunks of 1000). Each file at or over
-  `inline_threshold` (64 KiB) whose blob is missing is uploaded first with its
-  own `POST /blobs`, streamed and never buffered, and the commit then names it as
-  `{path, expected_oid, oid}`. A multi-file commit therefore stays one commit,
-  and its body carries only the small files: a request per tiny file costs more
-  than it saves. Re-committing unchanged content uploads nothing.
-- Blob uploads run in parallel waves: four in flight at the start, one more after
-  a faster clean wave, halved after a `429` or a transport error, sixteen at
-  most. A `429` waits for the largest `Retry-After` in the wave and retries only
-  the refused uploads, bounded, then `UploadsBusy`. A transport/5xx error retries
-  that upload, bounded. `409 staging_full` and `422 oid_mismatch` are never
-  retried: waiting or resending the same bytes cannot fix either. A stream is
-  rewound before every retry, so the second attempt sends the whole file.
 - A `422 unknown_object` on the commit means an uploaded blob expired (24 hours)
   or GC took it in the gap; the driver uploads those paths again and retries the
-  commit once. A server that predates `POST /blobs` answers the upload with a
-  plain 404 (`details.resource: "path"`); the driver remembers that and sends
-  every later commit's bytes inline, which is the behaviour the package had
-  before the endpoint existed.
+  commit once (see "Uploads" above).
 - Writes and blob uploads carry no `Idempotency-Key`: with one, the server can't
   refuse a stale version or a busy server before reading the body. A `429`
   (`uploads_busy`, or `rate_limited`) is refused before anything is written, and
