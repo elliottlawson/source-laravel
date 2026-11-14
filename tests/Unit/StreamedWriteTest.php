@@ -84,7 +84,7 @@ it('sends one file as a raw PUT with its version, size and message in headers', 
         ->and($put->hasHeader('Content-Length', '5'))->toBeTrue()
         ->and($put->hasHeader('If-Match', '"'.$oid.'"'))->toBeTrue()
         ->and($put->hasHeader('If-None-Match'))->toBeFalse()
-        ->and($put->hasHeader('Expect', '100-continue'))->toBeTrue()
+        ->and($put->hasHeader('Expect', '100-Continue'))->toBeTrue()
         ->and($put->header('X-Source-Author')[0])->toBe(rawurlencode('Elliott <elliott@example.com>'))
         ->and(rawurldecode($put->header('X-Source-Message')[0]))->toBe($message)
         ->and($put->header('X-Source-Message')[0])->toContain('%0A')

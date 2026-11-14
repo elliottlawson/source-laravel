@@ -224,6 +224,10 @@ final class HttpClient implements Client
             try {
                 $response = $this->request()
                     ->withHeaders($headers)
+                    // Guzzle's own `expect` option, so curl sends the header
+                    // it knows to wait on before uploading the body: a write
+                    // the server refuses (409, 413, 422, 429) costs no bytes.
+                    ->withOptions(['expect' => true])
                     ->withBody($payload->body(), 'application/octet-stream')
                     ->send('PUT', $url);
             } finally {
@@ -279,9 +283,6 @@ final class HttpClient implements Client
             'Content-Length' => (string) $payload->size(),
             'X-Source-Message' => rawurlencode($message),
             'Idempotency-Key' => $key,
-            // The server refuses a write it cannot accept before the body
-            // arrives; curl sends the body only after the 100 Continue.
-            'Expect' => '100-continue',
         ];
 
         if ($expectedOid === '') {
