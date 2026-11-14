@@ -30,7 +30,8 @@ use Throwable;
  * The body is never buffered. `contents()` exists for the in-memory fake, which
  * has to hold the bytes to model a server.
  *
- * @internal
+ * It is the body type of `Client::putFile()`, so a transport other than the two
+ * in this package receives one too.
  */
 final class Payload
 {
