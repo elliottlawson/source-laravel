@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Source;
 
+use Source\Support\Payload;
+
 /**
  * One change inside a batch commit.
  *
@@ -11,6 +13,11 @@ namespace Source;
  * plain change (expected === null) has its version filled in by the driver
  * just before the request; a strict change carries the version the caller
  * named and never retries.
+ *
+ * Exactly one of `content`, `payload`, `oid` and `delete` says where the bytes
+ * come from: `content` is a string in memory, `payload` is a stream (a
+ * single-file write streams it to the server, api.md 3.4.2), `oid` names a blob
+ * the repo already holds (api.md 3.4.3), and `delete` removes the file.
  */
 final readonly class Change
 {
@@ -20,11 +27,29 @@ final readonly class Change
         public ?string $content = null,
         public bool $delete = false,
         public ?string $mode = null,
+        public ?string $oid = null,
+        public ?Payload $payload = null,
     ) {}
 
     public static function put(string $path, string $expectedOid, string $content, ?string $mode = null): self
     {
         return new self($path, $expectedOid, $content, false, $mode);
+    }
+
+    /**
+     * A put whose bytes may be a stream: nothing is read into memory.
+     */
+    public static function stream(string $path, string $expectedOid, Payload $payload, ?string $mode = null): self
+    {
+        return new self($path, $expectedOid, null, false, $mode, null, $payload);
+    }
+
+    /**
+     * A put that names a blob the repo already holds, instead of its bytes.
+     */
+    public static function reference(string $path, ?string $expectedOid, string $oid, ?string $mode = null): self
+    {
+        return new self($path, $expectedOid, null, false, $mode, $oid);
     }
 
     public static function delete(string $path, string $expectedOid): self
@@ -38,7 +63,43 @@ final readonly class Change
     }
 
     /**
+     * Whether this change names a blob rather than carrying its bytes.
+     */
+    public function isReference(): bool
+    {
+        return $this->oid !== null;
+    }
+
+    /**
+     * The same change, naming the blob its bytes would produce.
+     */
+    public function asReference(string $oid): self
+    {
+        return new self($this->path, $this->expectedOid, null, false, $this->mode, $oid);
+    }
+
+    /**
+     * The Git blob id this change writes, or null for a delete.
+     */
+    public function blobOid(): ?string
+    {
+        if ($this->delete) {
+            return null;
+        }
+
+        if ($this->oid !== null) {
+            return $this->oid;
+        }
+
+        return $this->payload?->oid() ?? Payload::blobOid((string) $this->content);
+    }
+
+    /**
      * The change as the API wants it (api.md 3.14).
+     *
+     * A payload change has no place in a JSON body; it is only ever a
+     * single-file write, which streams (api.md 3.4.2). If one reaches a batch
+     * body after all, its bytes are inlined rather than silently dropped.
      *
      * @return array<string, mixed>
      */
@@ -51,10 +112,16 @@ final readonly class Change
 
         if ($this->delete) {
             $change['delete'] = true;
-        } elseif ($this->isUtf8((string) $this->content)) {
-            $change['content'] = (string) $this->content;
+        } elseif ($this->oid !== null) {
+            $change['oid'] = $this->oid;
         } else {
-            $change['content_base64'] = base64_encode((string) $this->content);
+            $contents = $this->payload?->contents() ?? (string) $this->content;
+
+            if ($this->isUtf8($contents)) {
+                $change['content'] = $contents;
+            } else {
+                $change['content_base64'] = base64_encode($contents);
+            }
         }
 
         if ($this->mode !== null) {

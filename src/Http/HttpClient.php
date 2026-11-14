@@ -21,6 +21,8 @@ use Source\FileStat;
 use Source\MergeResult;
 use Source\Session;
 use Source\SourceFile;
+use Source\Support\IdempotencyKey;
+use Source\Support\Payload;
 use Source\TreeEntry;
 
 /**
@@ -28,10 +30,15 @@ use Source\TreeEntry;
  */
 final class HttpClient implements Client
 {
+    private readonly Backoff $backoff;
+
     /**
      * @param  array{url?: string, token?: string, timeout?: int|float}  $config
      */
-    public function __construct(private readonly array $config) {}
+    public function __construct(private readonly array $config, ?Backoff $backoff = null)
+    {
+        $this->backoff = $backoff ?? new Backoff;
+    }
 
     public function head(string $namespace, string $repo, string $ref, string $path): ?FileStat
     {
@@ -118,18 +125,15 @@ final class HttpClient implements Client
     }
 
     /**
-     * The one write path.
+     * The batch write path.
      *
-     * Every write this package makes goes through here: single-file writes,
-     * deletes, moves, batch commits and reverts are all one POST /commits. It
-     * builds a JSON body today, using `content` for UTF-8 and `content_base64`
-     * otherwise.
+     * Every change carries its bytes (`content`), names a blob the repo holds
+     * (`oid`), or deletes a path. Single-file writes do not come through here:
+     * they stream over `putFile()`.
      *
-     * When raw-bytes streaming lands (api.md 3.4.2), this is the single place
-     * to switch: a raw file write is
-     * PUT /files/{ref}/{path} with an octet-stream body, If-Match /
-     * If-None-Match: *, X-Source-Message and Content-Length. Batch commits
-     * (POST /commits) stay as they are.
+     * The request carries an `Idempotency-Key`; the same key is reused if the
+     * server asks us to back off with `429`, so the retry is recognised as the
+     * same write (api.md 1.5, 3.4.4).
      */
     public function sendChanges(
         string $namespace,
@@ -153,17 +157,161 @@ final class HttpClient implements Client
             .'/repos/'.rawurlencode($repo)
             .'/commits');
 
-        $response = $this->request()->asJson()->post($url, $body);
+        $key = IdempotencyKey::generate();
+
+        return $this->backoff->run(function () use ($url, $body, $key): CommitResult {
+            $response = $this->request()
+                ->withHeaders(['Idempotency-Key' => $key])
+                ->asJson()
+                ->post($url, $body);
+
+            $this->ensureSuccess($response);
+
+            $files = [];
+
+            foreach (($response->json('files') ?? []) as $file) {
+                if (! is_array($file) || ! is_string($file['path'] ?? null)) {
+                    continue;
+                }
+
+                $files[] = new CommittedFile(
+                    path: $file['path'],
+                    version: is_string($file['oid'] ?? null) ? $file['oid'] : null,
+                    size: (int) ($file['size'] ?? 0),
+                    mode: is_string($file['mode'] ?? null) ? $file['mode'] : '100644',
+                    deleted: ($file['oid'] ?? null) === null,
+                );
+            }
+
+            return new CommitResult(
+                commitOid: (string) $response->json('commit.oid'),
+                refName: $response->json('ref.name') ?: null,
+                files: $files,
+                baseOid: $response->json('commit.base_oid') ?: null,
+            );
+        });
+    }
+
+    /**
+     * One streamed file write: `PUT .../files/{ref}/{path}` with the file as the
+     * body (api.md 3.4.2).
+     *
+     * Version check, message, author and mode travel in headers, because the
+     * body is the file. `Content-Length` is always sent — the server refuses a
+     * raw write without it (`411 length_required`) and uses it to refuse an
+     * oversize or over-capacity write before reading anything.
+     *
+     * The payload is rewound per attempt, so a `429` retry (same
+     * `Idempotency-Key`) or a driver-level retry after `409 file_changed` sends
+     * the same bytes again.
+     */
+    public function putFile(
+        string $namespace,
+        string $repo,
+        string $ref,
+        string $path,
+        Payload $payload,
+        string $expectedOid,
+        string $message,
+        ?Author $author = null,
+        ?string $mode = null,
+    ): CommitResult {
+        $url = $this->fileUrl($namespace, $repo, $ref, $path);
+        $key = IdempotencyKey::generate();
+        $headers = $this->rawHeaders($payload, $expectedOid, $message, $author, $mode, $key);
+
+        return $this->backoff->run(function () use ($url, $payload, $headers): CommitResult {
+            try {
+                $response = $this->request()
+                    ->withHeaders($headers)
+                    ->withBody($payload->body(), 'application/octet-stream')
+                    ->send('PUT', $url);
+            } finally {
+                // Guzzle must not close a stream the caller still owns.
+                $payload->release();
+            }
+
+            $this->ensureSuccess($response);
+
+            return $this->singleFileResult($response);
+        });
+    }
+
+    public function presentObjects(string $namespace, string $repo, array $oids): array
+    {
+        $url = $this->url('namespaces/'.rawurlencode($namespace)
+            .'/repos/'.rawurlencode($repo)
+            .'/objects/present');
+
+        $response = $this->request()->asJson()->post($url, ['oids' => array_values($oids)]);
 
         $this->ensureSuccess($response);
 
+        $present = [];
+
+        foreach ((array) ($response->json('present') ?? []) as $oid) {
+            if (is_string($oid)) {
+                $present[] = $oid;
+            }
+        }
+
+        return $present;
+    }
+
+    /**
+     * The headers of a raw file write (api.md 3.4.2).
+     *
+     * The message and author are percent-encoded UTF-8 so a multi-line message
+     * and its trailers fit in a header; the server decodes them with the same
+     * rules RFC 3986 describes.
+     *
+     * @return array<string, string>
+     */
+    private function rawHeaders(
+        Payload $payload,
+        string $expectedOid,
+        string $message,
+        ?Author $author,
+        ?string $mode,
+        string $key,
+    ): array {
+        $headers = [
+            'Content-Length' => (string) $payload->size(),
+            'X-Source-Message' => rawurlencode($message),
+            'Idempotency-Key' => $key,
+            // The server refuses a write it cannot accept before the body
+            // arrives; curl sends the body only after the 100 Continue.
+            'Expect' => '100-continue',
+        ];
+
+        if ($expectedOid === '') {
+            $headers['If-None-Match'] = '*';
+        } else {
+            $headers['If-Match'] = '"'.$expectedOid.'"';
+        }
+
+        if ($author !== null) {
+            $headers['X-Source-Author'] = rawurlencode($author->name.' <'.$author->email.'>');
+        }
+
+        if ($mode !== null && $mode !== '') {
+            $headers['X-Source-Mode'] = $mode;
+        }
+
+        return $headers;
+    }
+
+    /**
+     * The `{commit, file, ref}` body of a raw file write. It carries one `file`
+     * object where a batch commit carries a `files` list.
+     */
+    private function singleFileResult(Response $response): CommitResult
+    {
         $files = [];
 
-        foreach (($response->json('files') ?? []) as $file) {
-            if (! is_array($file) || ! is_string($file['path'] ?? null)) {
-                continue;
-            }
+        $file = $response->json('file');
 
+        if (is_array($file) && is_string($file['path'] ?? null)) {
             $files[] = new CommittedFile(
                 path: $file['path'],
                 version: is_string($file['oid'] ?? null) ? $file['oid'] : null,

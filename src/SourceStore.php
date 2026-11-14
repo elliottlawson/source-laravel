@@ -16,8 +16,11 @@ use Source\Exceptions\MergeConflict;
 use Source\Exceptions\NoSession;
 use Source\Exceptions\NotFound;
 use Source\Exceptions\ReadOnlyDisk;
+use Source\Exceptions\UnknownObject;
 use Source\Http\Client;
-use Source\Support\Contents;
+use Source\Support\Payload;
+use Source\Uploads\OidWhenPresent;
+use Source\Uploads\Uploader;
 
 /**
  * The driver's brain for one repo and branch.
@@ -29,9 +32,14 @@ use Source\Support\Contents;
  *    409 file_changed;
  *  - a strict write carries the version the caller named and never retries.
  *
+ * Every write leaves through `send()`, which picks one of the server's two write
+ * paths: one file streams as the body of `PUT .../files/{ref}/{path}` (api.md
+ * 3.4.2), and anything else is one all-or-nothing `POST /commits`. The batch
+ * path asks the `Uploader` seam how each change's bytes travel; today that means
+ * naming a blob the repo already holds instead of sending it again (3.4.3).
+ *
  * History (`history`, `at`, `diff`, `revert`) and branches (`branch`,
- * `mergeInto`) are the extras that need more than the filesystem. Every write
- * still leaves through `send()`.
+ * `mergeInto`) are the extras that need more than the filesystem.
  */
 class SourceStore
 {
@@ -39,6 +47,11 @@ class SourceStore
      * A plain write (or a whole batch of plain writes) gets three attempts.
      */
     public const ATTEMPTS = 3;
+
+    /**
+     * How each batch change's bytes reach the server. See Uploader.
+     */
+    protected Uploader $uploader;
 
     /**
      * A disk pinned to a commit: reads only.
@@ -62,7 +75,10 @@ class SourceStore
         protected array $meta = [],
         protected ?Closure $authorResolver = null,
         protected ?string $sessionId = null,
-    ) {}
+        ?Uploader $uploader = null,
+    ) {
+        $this->uploader = $uploader ?? new OidWhenPresent($client);
+    }
 
     public function namespace(): string
     {
@@ -504,21 +520,21 @@ class SourceStore
     // --- writing -----------------------------------------------------------
 
     /**
-     * Last-write-wins put. Reads the current version, writes against it and
-     * retries on file_changed.
+     * Last-write-wins put. Reads the current version and writes against it,
+     * streaming the bytes to the server; retries on file_changed.
      */
     public function put(string $path, mixed $contents, ?string $message = null): CommitResult
     {
         $this->assertWritable();
 
-        $contents = Contents::toString($contents);
+        $payload = Payload::from($contents);
 
-        return $this->withRetries(function () use ($path, $contents, $message): array {
+        return $this->withRetries(function () use ($path, $payload, $message): array {
             $stat = $this->stat($path);
 
             return [
                 $message ?? ($stat === null ? "Create {$path}" : "Update {$path}"),
-                [Change::put($path, $stat?->version ?? '', $contents)],
+                [Change::stream($path, $stat?->version ?? '', $payload)],
             ];
         });
     }
@@ -530,11 +546,9 @@ class SourceStore
     {
         $this->assertWritable();
 
-        $contents = Contents::toString($contents);
-
         return $this->send(
             $message ?? ($expectedOid === '' ? "Create {$path}" : "Update {$path}"),
-            [Change::put($path, $expectedOid, $contents)],
+            [Change::stream($path, $expectedOid, Payload::from($contents))],
         );
     }
 
@@ -686,6 +700,9 @@ class SourceStore
     /**
      * The one place a write can leave, and the one place read-only bites.
      *
+     * One file (a put, a copy) streams as the body of a raw `PUT` (api.md
+     * 3.4.2). A delete, or more than one change, is one batch commit.
+     *
      * @param  list<Change>  $changes
      * @param  array<string, mixed>  $meta
      */
@@ -693,14 +710,71 @@ class SourceStore
     {
         $this->assertWritable();
 
-        return $this->client->sendChanges(
-            $this->namespace,
-            $this->repo,
-            $this->ref,
-            $this->decorate($message, array_replace($this->meta, $meta)),
-            $author ?? $this->defaultAuthor(),
-            array_values($changes),
-        );
+        $changes = array_values($changes);
+
+        $message = $this->decorate($message, array_replace($this->meta, $meta));
+        $author ??= $this->defaultAuthor();
+
+        if (count($changes) === 1 && ! $changes[0]->isDelete()) {
+            return $this->sendFile($message, $changes[0], $author);
+        }
+
+        return $this->sendCommit($message, $changes, $author);
+    }
+
+    /**
+     * One file, streamed: the payload goes as the request body and never into
+     * memory.
+     */
+    protected function sendFile(string $message, Change $change, ?Author $author): CommitResult
+    {
+        $payload = $change->payload ?? Payload::from((string) $change->content);
+
+        try {
+            return $this->client->putFile(
+                $this->namespace,
+                $this->repo,
+                $this->ref,
+                $change->path,
+                $payload,
+                $change->expectedOid ?? '',
+                $message,
+                $author,
+                $change->mode,
+            );
+        } finally {
+            $payload->release();
+        }
+    }
+
+    /**
+     * One all-or-nothing batch commit.
+     *
+     * The uploader decides which changes travel by oid rather than bytes. Its
+     * answer is a hint, so a `422 unknown_object` means "send those bytes";
+     * that costs one more POST per commit, once, and is the only retry here.
+     *
+     * @param  list<Change>  $changes
+     */
+    protected function sendCommit(string $message, array $changes, ?Author $author): CommitResult
+    {
+        $inline = [];
+
+        for ($attempt = 1; ; $attempt++) {
+            $wire = $this->uploader->prepare($this->namespace, $this->repo, $this->ref, $changes, $inline);
+
+            try {
+                return $this->client->sendChanges($this->namespace, $this->repo, $this->ref, $message, $author, $wire);
+            } catch (UnknownObject $e) {
+                if ($attempt >= 2) {
+                    throw $e;
+                }
+
+                // The repo stopped holding a blob between the hint and the
+                // write: resend those paths' bytes.
+                $inline = array_fill_keys($e->paths(), true);
+            }
+        }
     }
 
     protected function assertWritable(): void

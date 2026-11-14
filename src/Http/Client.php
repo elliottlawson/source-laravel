@@ -14,6 +14,7 @@ use Source\FileStat;
 use Source\MergeResult;
 use Source\Session;
 use Source\SourceFile;
+use Source\Support\Payload;
 use Source\TreeEntry;
 
 /**
@@ -22,8 +23,9 @@ use Source\TreeEntry;
  * The driver never talks HTTP itself, so swapping this for the in-memory fake
  * exercises the same retry and version-filling logic (see Source::fake()).
  *
- * The methods map one-to-one onto API endpoints: reads and the one write path
- * for files, plus the log, the diff, the session and the merge endpoints.
+ * The methods map one-to-one onto API endpoints: reads, the two write paths for
+ * files (one streamed file, or a batch commit), plus the log, the diff, the
+ * session and the merge endpoints.
  */
 interface Client
 {
@@ -45,7 +47,10 @@ interface Client
     public function listTree(string $namespace, string $repo, string $ref, string $path = '', bool $recursive = false): array;
 
     /**
-     * Send one all-or-nothing batch commit. This is the only write path.
+     * Send one all-or-nothing batch commit.
+     *
+     * The changes carry their own bytes (`content`), name a blob the repo
+     * already holds (`oid`), or delete a path.
      *
      * @param  list<Change>  $changes
      */
@@ -57,6 +62,35 @@ interface Client
         ?Author $author,
         array $changes,
     ): CommitResult;
+
+    /**
+     * Write one file with its bytes as the request body (api.md 3.4.2).
+     *
+     * The payload streams: a resource is never read into memory. `$expectedOid`
+     * is the version being replaced; `''` means the path must not exist yet.
+     */
+    public function putFile(
+        string $namespace,
+        string $repo,
+        string $ref,
+        string $path,
+        Payload $payload,
+        string $expectedOid,
+        string $message,
+        ?Author $author = null,
+        ?string $mode = null,
+    ): CommitResult;
+
+    /**
+     * Which of these blob ids the repo already holds (api.md 3.4.3).
+     *
+     * The answer is a hint: the write path decides, so a blob reported present
+     * may still come back as `422 unknown_object`.
+     *
+     * @param  list<string>  $oids  1 to 1000 per call; the caller chunks
+     * @return list<string>
+     */
+    public function presentObjects(string $namespace, string $repo, array $oids): array;
 
     /**
      * One page of the commit log, newest first.

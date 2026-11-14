@@ -132,6 +132,10 @@ it('retries a batch only when every mismatched path is a plain change', function
             return headResponse();
         }
 
+        if (str_contains($request->url(), '/objects/present')) {
+            return Http::response(['present' => []]);
+        }
+
         return ++$posts === 1 ? changedResponse(['b.md']) : okCommitResponse();
     });
 
@@ -149,6 +153,10 @@ it('refuses a batch without retrying when a strict change mismatched', function 
     Http::fake(function (Request $request) use (&$posts) {
         if ($request->method() === 'HEAD') {
             return headResponse();
+        }
+
+        if (str_contains($request->url(), '/objects/present')) {
+            return Http::response(['present' => []]);
         }
 
         $posts++;
@@ -177,6 +185,10 @@ it('writes a move as one commit with the destination create and the source delet
                 'X-Object-Oid' => str_repeat('e', 40),
                 'X-Object-Size' => '6',
             ]);
+        }
+
+        if (str_contains($request->url(), '/objects/present')) {
+            return Http::response(['present' => []]);
         }
 
         $posts[] = $request->data();
@@ -216,20 +228,29 @@ it('writes a delete as one commit naming the version', function () {
         ]);
 });
 
-it('turns the version into expected_oid for a plain put', function () {
-    $posts = [];
+it('turns the version into a quoted If-Match on a raw file write', function () {
+    $puts = [];
 
-    Http::fake(function (Request $request) use (&$posts) {
+    Http::fake(function (Request $request) use (&$puts) {
         if ($request->method() === 'HEAD') {
             return headResponse(str_repeat('1', 40));
         }
 
-        $posts[] = $request->data();
+        $puts[] = $request;
 
-        return okCommitResponse();
+        return Http::response([
+            'commit' => ['oid' => str_repeat('b', 40), 'base_oid' => str_repeat('c', 40)],
+            'ref' => ['name' => 'main', 'target_oid' => str_repeat('b', 40)],
+            'file' => ['path' => 'a.md', 'oid' => str_repeat('d', 40), 'size' => 4, 'mode' => '100644'],
+        ]);
     });
 
     retryStore()->put('a.md', 'mine');
 
-    expect($posts[0]['changes'][0]['expected_oid'])->toBe(str_repeat('1', 40));
+    expect($puts)->toHaveCount(1)
+        ->and($puts[0]->method())->toBe('PUT')
+        ->and($puts[0]->url())->toBe('https://source.test/v1/namespaces/acme/repos/workspace/files/main/a.md')
+        ->and($puts[0]->hasHeader('If-Match', '"'.str_repeat('1', 40).'"'))->toBeTrue()
+        ->and($puts[0]->hasHeader('Content-Length', '4'))->toBeTrue()
+        ->and($puts[0]->body())->toBe('mine');
 });

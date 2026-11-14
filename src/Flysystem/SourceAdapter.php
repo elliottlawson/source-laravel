@@ -21,7 +21,6 @@ use League\Flysystem\UnableToWriteFile;
 use Source\Exceptions\SourceException;
 use Source\FileStat;
 use Source\SourceStore;
-use Source\Support\Contents;
 
 /**
  * The Flysystem adapter under the Laravel disk.
@@ -64,7 +63,7 @@ final class SourceAdapter implements FilesystemAdapter
     public function writeStream(string $path, $contents, Config $config): void
     {
         try {
-            $this->store->put($path, Contents::toString($contents));
+            $this->store->put($path, $contents);
         } catch (SourceException $e) {
             throw UnableToWriteFile::atLocation($path, $e->getMessage(), $e);
         }

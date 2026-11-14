@@ -19,12 +19,16 @@ use Source\Exceptions\Conflict;
 use Source\Exceptions\FileChanged;
 use Source\Exceptions\MergeConflict;
 use Source\Exceptions\NotFound;
+use Source\Exceptions\UnknownObject;
+use Source\Exceptions\UploadsBusy;
 use Source\Exceptions\ValidationFailed;
 use Source\FileStat;
+use Source\Http\Backoff;
 use Source\Http\Client;
 use Source\MergeResult;
 use Source\Session;
 use Source\SourceFile;
+use Source\Support\Payload;
 use Source\TreeEntry;
 
 /**
@@ -41,11 +45,25 @@ use Source\TreeEntry;
  * conflicts when both sides changed the same path to different contents since
  * the merge base, and otherwise takes the changed side, which is what an
  * ordinary three-way merge does.
+ *
+ * The two write forms of api.md 3.4.2 are both here: `putFile()` is the raw
+ * streamed PUT (it hashes the payload as Git does and counts the bytes as
+ * uploaded), `sendChanges()` is the batch commit with inline bytes or `oid`
+ * references. `presentObjects()` answers like the server: a blob the repo holds
+ * from any commit it has recorded. A commit naming a blob it does not hold is a
+ * `422 unknown_object`, and `simulateBusy()` makes the next writes answer `429
+ * uploads_busy` so the client's back-off can be tested.
  */
 final class FakeClient implements Client
 {
     /** @var array<string, array<string, string>> repo key => path => contents */
     private array $files = [];
+
+    /** @var array<string, array<string, string>> repo => blob oid => contents */
+    private array $blobs = [];
+
+    /** @var array<string, list<int>> path => sizes of raw PUTs that carried it */
+    private array $uploads = [];
 
     /** @var array<string, array<string, ChangedBy>> repo key => path => who moved it */
     private array $changed = [];
@@ -88,6 +106,20 @@ final class FakeClient implements Client
     private ?Closure $writeHook = null;
 
     private bool $inHook = false;
+
+    /**
+     * How many more write attempts answer 429 uploads_busy.
+     */
+    private int $busy = 0;
+
+    private int $busyRetryAfter = 1;
+
+    private readonly Backoff $backoff;
+
+    public function __construct(?Backoff $backoff = null)
+    {
+        $this->backoff = $backoff ?? new Backoff;
+    }
 
     /**
      * Run the hook before each write. Pass null to remove it.
@@ -201,6 +233,30 @@ final class FakeClient implements Client
             throw new \InvalidArgumentException('A commit needs at least one change.');
         }
 
+        return $this->backoff->run(function () use ($namespace, $repo, $ref, $message, $author, $changes): CommitResult {
+            $this->busyCheck();
+
+            return $this->commitOnce($namespace, $repo, $ref, $message, $author, $changes);
+        });
+    }
+
+    /**
+     * One batch commit, applied all or nothing.
+     *
+     * A change either carries bytes or names a blob; a named blob must be one
+     * this repo holds, or the whole commit is refused with 422 unknown_object
+     * and nothing is written (api.md 3.4.3).
+     *
+     * @param  list<Change>  $changes
+     */
+    private function commitOnce(
+        string $namespace,
+        string $repo,
+        string $ref,
+        string $message,
+        ?Author $author,
+        array $changes,
+    ): CommitResult {
         $key = $this->key($namespace, $repo, $ref);
         $this->lastRepoKey = $key;
 
@@ -232,6 +288,25 @@ final class FakeClient implements Client
             );
         }
 
+        // A named blob must be one this repo holds (api.md 3.4.3). Nothing is
+        // written when any is unknown, and every refused path is listed.
+        $held = $this->blobs[$namespace.'/'.$repo] ?? [];
+        $unknown = [];
+
+        foreach ($changes as $change) {
+            if ($change->isReference() && ! isset($held[(string) $change->oid])) {
+                $unknown[] = ['path' => $change->path, 'oid' => (string) $change->oid];
+            }
+        }
+
+        if ($unknown !== []) {
+            throw new UnknownObject(
+                'The repo does not hold these objects as blobs reachable from a ref; send their bytes.',
+                'unknown_object',
+                ['paths' => $unknown],
+            );
+        }
+
         $next = $current;
 
         foreach ($changes as $change) {
@@ -241,7 +316,9 @@ final class FakeClient implements Client
                 continue;
             }
 
-            $next[$change->path] = (string) $change->content;
+            $next[$change->path] = $change->isReference()
+                ? (string) $held[(string) $change->oid]
+                : $change->payload?->contents() ?? (string) $change->content;
         }
 
         $parent = $this->tips[$key] ?? '';
@@ -261,13 +338,134 @@ final class FakeClient implements Client
         foreach ($changes as $change) {
             if ($change->delete) {
                 $files[] = new CommittedFile($change->path, null, 0, '100644', deleted: true);
-            } else {
-                $contents = (string) $change->content;
-                $files[] = new CommittedFile($change->path, self::oid($contents), strlen($contents));
+
+                continue;
             }
+
+            $contents = $next[$change->path];
+
+            $files[] = new CommittedFile($change->path, self::oid($contents), strlen($contents), $change->mode ?? '100644');
         }
 
         return new CommitResult($commit, $ref, $files, $this->tips[$key]);
+    }
+
+    /**
+     * The raw streamed write (api.md 3.4.2): the payload's bytes are the file.
+     *
+     * The size and the Git blob id are computed from the payload exactly as the
+     * server does, and the bytes are remembered as uploaded, so a test can tell
+     * a streamed write from one that travelled inside a commit body.
+     */
+    public function putFile(
+        string $namespace,
+        string $repo,
+        string $ref,
+        string $path,
+        Payload $payload,
+        string $expectedOid,
+        string $message,
+        ?Author $author = null,
+        ?string $mode = null,
+    ): CommitResult {
+        return $this->backoff->run(function () use ($namespace, $repo, $ref, $path, $payload, $expectedOid, $message, $author, $mode): CommitResult {
+            $this->busyCheck();
+
+            $contents = $payload->contents();
+
+            if (Payload::blobOid($contents) !== $payload->oid()) {
+                throw new ValidationFailed('The payload changed while it was being sent.', 'validation_failed');
+            }
+
+            $this->uploads[$path][] = strlen($contents);
+
+            return $this->commitOnce(
+                $namespace,
+                $repo,
+                $ref,
+                $message,
+                $author,
+                [Change::put($path, $expectedOid, $contents, $mode)],
+            );
+        });
+    }
+
+    /**
+     * The subset of blobs this repo holds (api.md 3.4.3).
+     *
+     * The fake keeps every blob any of its commits wrote, which is the
+     * reachable set it can answer from; the real server also excludes blobs no
+     * ref reaches, and the write path is what settles the difference.
+     */
+    public function presentObjects(string $namespace, string $repo, array $oids): array
+    {
+        $held = $this->blobs[$namespace.'/'.$repo] ?? [];
+
+        $present = [];
+        $seen = [];
+
+        foreach ($oids as $oid) {
+            if (isset($seen[$oid])) {
+                continue;
+            }
+
+            $seen[$oid] = true;
+
+            if (isset($held[$oid])) {
+                $present[] = $oid;
+            }
+        }
+
+        return $present;
+    }
+
+    /**
+     * Answer the next `$times` write attempts with 429 uploads_busy.
+     *
+     * The fake is the transport as well as the server, so it also owns the
+     * client's bounded retry: a write made while busy is retried with the same
+     * request, which is what api.md 3.4.4 asks a client to do.
+     */
+    public function simulateBusy(int $times = 1, int $retryAfter = 1): static
+    {
+        $this->busy = max(0, $times);
+        $this->busyRetryAfter = max(1, $retryAfter);
+
+        return $this;
+    }
+
+    /**
+     * Whether a raw PUT carried this path's bytes (rather than a commit body).
+     */
+    public function hasUploaded(string $path): bool
+    {
+        return ($this->uploads[$path] ?? []) !== [];
+    }
+
+    /**
+     * The sizes of the raw PUTs that carried this path.
+     *
+     * @return list<int>
+     */
+    public function uploadsOf(string $path): array
+    {
+        return $this->uploads[$path] ?? [];
+    }
+
+    /**
+     * Whether a commit named this path's blob instead of sending its bytes.
+     */
+    public function hasReferenced(string $path): bool
+    {
+        foreach ($this->commits as $commit) {
+            foreach ($commit['changes'] as $change) {
+                if ($change->path === $path && $change->isReference()) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     // --- Client: history ---------------------------------------------------
@@ -720,15 +918,14 @@ final class FakeClient implements Client
                 $new .= ' ';
             }
 
-            $this->sendChanges(
+            $this->commitOnce(
                 $namespace,
                 $repo,
                 $ref,
                 "Simulate change to {$path}",
                 new Author('someone else', 'someone@example.com'),
                 [Change::put($path, $existing === null ? '' : self::oid($existing), $new)],
-            );
-        }
+            );        }
 
         return $this;
     }
@@ -873,6 +1070,12 @@ final class FakeClient implements Client
 
         $this->tips[$key] = $oid;
         $this->files[$key] = $files;
+
+        // Every blob any commit of this repo wrote is what the fake answers
+        // objects/present from.
+        foreach ($files as $contents) {
+            $this->blobs[$namespace.'/'.$repo][self::oid($contents)] = $contents;
+        }
 
         $actor = new ChangedBy(
             commitOid: $oid,
@@ -1326,6 +1529,30 @@ final class FakeClient implements Client
         } finally {
             $this->inHook = false;
         }
+    }
+
+    /**
+     * Refuse one write attempt as 429 uploads_busy (api.md 3.4.4).
+     */
+    private function busyCheck(): void
+    {
+        if ($this->busy <= 0) {
+            return;
+        }
+
+        $this->busy--;
+
+        throw new UploadsBusy(
+            'Upload capacity is busy; retry after the delay.',
+            [
+                'scope' => 'repo',
+                'limit_bytes' => 512 << 20,
+                'in_flight_bytes' => 512 << 20,
+                'retry_after' => $this->busyRetryAfter,
+            ],
+            null,
+            $this->busyRetryAfter,
+        );
     }
 
     private function key(string $namespace, string $repo, string $ref): string

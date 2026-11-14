@@ -19,6 +19,8 @@ use Illuminate\Support\Facades\Facade;
  * @method static void assertNotCommitted(string $message)
  * @method static void assertWritten(string $path)
  * @method static void assertNothingWritten(string $path)
+ * @method static void assertUploaded(string $path)
+ * @method static void assertReferenced(string $path)
  * @method static void assertNothingCommitted()
  * @method static void assertReverted(string $commitOid)
  *

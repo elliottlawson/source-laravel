@@ -196,6 +196,29 @@ class SourceManager
         );
     }
 
+    /**
+     * Assert that a raw PUT streamed this path's bytes to the server.
+     */
+    public function assertUploaded(string $path): void
+    {
+        PHPUnit::assertTrue(
+            $this->fakeOrFail()->hasUploaded($path),
+            "Expected [{$path}] to be uploaded as a raw file write, but no PUT carried it.",
+        );
+    }
+
+    /**
+     * Assert that a commit named this path's blob instead of sending its bytes
+     * (api.md 3.4.3).
+     */
+    public function assertReferenced(string $path): void
+    {
+        PHPUnit::assertTrue(
+            $this->fakeOrFail()->hasReferenced($path),
+            "Expected [{$path}] to be committed by oid, but its bytes were sent.",
+        );
+    }
+
     public function assertNothingCommitted(): void
     {
         PHPUnit::assertSame(

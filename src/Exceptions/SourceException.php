@@ -67,7 +67,14 @@ class SourceException extends RuntimeException
             $response->status() === 403 => new Forbidden($message, $code, $details, $requestId),
             $response->status() === 409 => new Conflict($message, $code, $details, $requestId),
             $response->status() === 413 => new FileTooLarge($message, $details, $requestId),
+            $response->status() === 422 && $code === 'unknown_object' => new UnknownObject($message, $code, $details, $requestId),
             $response->status() === 422 => new ValidationFailed($message, $code, $details, $requestId),
+            $response->status() === 429 && $code === 'uploads_busy' => new UploadsBusy(
+                $message,
+                $details,
+                $requestId,
+                (int) ($details['retry_after'] ?? $response->header('Retry-After') ?: 1),
+            ),
             $response->status() === 429 => new RateLimited(
                 $message,
                 $code,
