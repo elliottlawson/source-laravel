@@ -206,6 +206,17 @@ class SourceManager
     }
 
     /**
+     * Assert that a commit reverts the given commit (`Reverts: <oid>`).
+     */
+    public function assertReverted(string $commitOid): void
+    {
+        PHPUnit::assertTrue(
+            $this->fakeOrFail()->hasReverted($commitOid),
+            "Expected a commit reverting [{$commitOid}], but none carried a Reverts trailer.",
+        );
+    }
+
+    /**
      * @param  array<string, mixed>  $config
      * @return array<string, mixed>
      */

@@ -9,10 +9,17 @@ use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Source\Author;
 use Source\Change;
+use Source\Commit;
+use Source\CommitPage;
 use Source\CommitResult;
 use Source\CommittedFile;
+use Source\Diff;
+use Source\DiffFile;
+use Source\DiffHunk;
 use Source\Exceptions\SourceException;
 use Source\FileStat;
+use Source\MergeResult;
+use Source\Session;
 use Source\SourceFile;
 use Source\TreeEntry;
 
@@ -114,8 +121,8 @@ final class HttpClient implements Client
      * The one write path.
      *
      * Every write this package makes goes through here: single-file writes,
-     * deletes, moves and batch commits are all one POST /commits. It builds a
-     * JSON body today, using `content` for UTF-8 and `content_base64`
+     * deletes, moves, batch commits and reverts are all one POST /commits. It
+     * builds a JSON body today, using `content` for UTF-8 and `content_base64`
      * otherwise.
      *
      * When raw-bytes streaming lands (api.md 3.4.2), this is the single place
@@ -174,6 +181,249 @@ final class HttpClient implements Client
         );
     }
 
+    public function log(
+        string $namespace,
+        string $repo,
+        string $ref,
+        ?string $path = null,
+        ?string $cursor = null,
+        int $limit = 200,
+    ): CommitPage {
+        $query = ['ref' => $ref, 'limit' => (string) $limit];
+
+        if ($path !== null && $path !== '') {
+            $query['path'] = $path;
+        }
+
+        if ($cursor !== null && $cursor !== '') {
+            $query['cursor'] = $cursor;
+        }
+
+        $url = $this->url('namespaces/'.rawurlencode($namespace)
+            .'/repos/'.rawurlencode($repo)
+            .'/log').'?'.http_build_query($query, '', '&', PHP_QUERY_RFC3986);
+
+        $response = $this->request()->get($url);
+
+        $this->ensureSuccess($response);
+
+        $commits = [];
+
+        foreach (($response->json('commits') ?? []) as $commit) {
+            if (is_array($commit)) {
+                $commits[] = Commit::fromArray($commit);
+            }
+        }
+
+        $next = $response->json('next_cursor');
+
+        return new CommitPage($commits, is_string($next) && $next !== '' ? $next : null);
+    }
+
+    public function commit(string $namespace, string $repo, string $ref): Commit
+    {
+        $url = $this->url('namespaces/'.rawurlencode($namespace)
+            .'/repos/'.rawurlencode($repo)
+            .'/commits/'.self::encodeRef($ref));
+
+        $response = $this->request()->get($url);
+
+        $this->ensureSuccess($response);
+
+        $commit = $response->json('commit');
+
+        return Commit::fromArray(is_array($commit) ? $commit : []);
+    }
+
+    public function diff(string $namespace, string $repo, string $from, string $to, ?string $path = null): Diff
+    {
+        $query = ['from' => $from, 'to' => $to, 'format' => 'structured'];
+
+        if ($path !== null && $path !== '') {
+            $query['path'] = $path;
+        }
+
+        $url = $this->url('namespaces/'.rawurlencode($namespace)
+            .'/repos/'.rawurlencode($repo)
+            .'/diff').'?'.http_build_query($query, '', '&', PHP_QUERY_RFC3986);
+
+        $response = $this->request()->get($url);
+
+        $this->ensureSuccess($response);
+
+        $files = [];
+
+        foreach (($response->json('files') ?? []) as $file) {
+            if (! is_array($file) || ! is_string($file['path'] ?? null)) {
+                continue;
+            }
+
+            $hunks = [];
+
+            foreach (($file['hunks'] ?? []) as $hunk) {
+                if (! is_array($hunk)) {
+                    continue;
+                }
+
+                $hunks[] = new DiffHunk(
+                    oldStart: (int) ($hunk['old_start'] ?? 0),
+                    oldLines: (int) ($hunk['old_lines'] ?? 0),
+                    newStart: (int) ($hunk['new_start'] ?? 0),
+                    newLines: (int) ($hunk['new_lines'] ?? 0),
+                    lines: array_values(array_filter((array) ($hunk['lines'] ?? []), 'is_string')),
+                );
+            }
+
+            $files[] = new DiffFile(
+                path: $file['path'],
+                status: is_string($file['status'] ?? null) ? $file['status'] : DiffFile::MODIFIED,
+                oldPath: is_string($file['old_path'] ?? null) ? $file['old_path'] : null,
+                binary: (bool) ($file['binary'] ?? false),
+                additions: (int) ($file['additions'] ?? 0),
+                deletions: (int) ($file['deletions'] ?? 0),
+                hunks: $hunks,
+            );
+        }
+
+        return new Diff(
+            from: (string) $response->json('from'),
+            to: (string) $response->json('to'),
+            files: $files,
+        );
+    }
+
+    public function diffText(string $namespace, string $repo, string $from, string $to, ?string $path = null): string
+    {
+        $query = ['from' => $from, 'to' => $to, 'format' => 'unified'];
+
+        if ($path !== null && $path !== '') {
+            $query['path'] = $path;
+        }
+
+        $url = $this->url('namespaces/'.rawurlencode($namespace)
+            .'/repos/'.rawurlencode($repo)
+            .'/diff').'?'.http_build_query($query, '', '&', PHP_QUERY_RFC3986);
+
+        $response = $this->request('text/plain')->get($url);
+
+        $this->ensureSuccess($response);
+
+        return $response->body();
+    }
+
+    public function findSession(string $namespace, string $repo, string $ref): ?Session
+    {
+        $url = $this->url('namespaces/'.rawurlencode($namespace)
+            .'/repos/'.rawurlencode($repo)
+            .'/sessions').'?'.http_build_query(['ref' => $ref], '', '&', PHP_QUERY_RFC3986);
+
+        $response = $this->request()->get($url);
+
+        if ($this->isMissing($response)) {
+            return null;
+        }
+
+        $this->ensureSuccess($response);
+
+        $wanted = self::shortRef($ref);
+        $found = null;
+
+        foreach (($response->json('sessions') ?? []) as $session) {
+            if (! is_array($session) || ! is_string($session['id'] ?? null)) {
+                continue;
+            }
+
+            // The server filters by ref; check it again so a server that
+            // ignores the filter cannot hand back someone else's session.
+            if (self::shortRef((string) ($session['ref'] ?? '')) === $wanted) {
+                $found = Session::fromArray($session);
+            }
+        }
+
+        return $found;
+    }
+
+    public function createSession(string $namespace, string $repo, string $from, string $ref): Session
+    {
+        $url = $this->url('namespaces/'.rawurlencode($namespace)
+            .'/repos/'.rawurlencode($repo)
+            .'/sessions');
+
+        $response = $this->request()->asJson()->post($url, ['from' => $from, 'ref' => $ref]);
+
+        $this->ensureSuccess($response);
+
+        $session = $response->json('session');
+
+        return Session::fromArray(is_array($session) ? $session : []);
+    }
+
+    public function merge(string $namespace, string $repo, string $sessionId, string $target): MergeResult
+    {
+        $url = $this->sessionUrl($namespace, $repo, $sessionId).'/merge';
+
+        $response = $this->request()->asJson()->post($url, ['target' => $target]);
+
+        $this->ensureSuccess($response);
+
+        return MergeResult::fromArray((array) ($response->json('merge') ?? []));
+    }
+
+    public function resolveMerge(
+        string $namespace,
+        string $repo,
+        string $sessionId,
+        string $mergeId,
+        array $resolutions,
+        ?string $message = null,
+    ): MergeResult {
+        $paths = [];
+
+        foreach ($resolutions as $path => $resolution) {
+            $entry = ['path' => (string) $path];
+
+            if (in_array($resolution, ['ours', 'theirs', 'delete'], true)) {
+                $entry['resolution'] = $resolution;
+            } elseif (preg_match('//u', $resolution) === 1) {
+                $entry['resolution'] = 'content';
+                $entry['content'] = $resolution;
+            } else {
+                $entry['resolution'] = 'content';
+                $entry['content_base64'] = base64_encode($resolution);
+            }
+
+            $paths[] = $entry;
+        }
+
+        $body = ['paths' => $paths];
+
+        if ($message !== null && $message !== '') {
+            $body['message'] = $message;
+        }
+
+        $url = $this->sessionUrl($namespace, $repo, $sessionId)
+            .'/merges/'.rawurlencode($mergeId).'/resolve';
+
+        $response = $this->request()->asJson()->post($url, $body);
+
+        $this->ensureSuccess($response);
+
+        return MergeResult::fromArray((array) ($response->json('merge') ?? []));
+    }
+
+    public function abortMerge(string $namespace, string $repo, string $sessionId, ?string $mergeId = null): Session
+    {
+        $url = $this->sessionUrl($namespace, $repo, $sessionId).'/abort';
+
+        $body = $mergeId !== null && $mergeId !== '' ? ['merge_id' => $mergeId] : [];
+
+        $response = $this->request()->asJson()->post($url, $body);
+
+        $this->ensureSuccess($response);
+
+        return Session::fromArray((array) ($response->json('session') ?? []));
+    }
+
     /**
      * Percent-encode a ref. `sessions/01J...` is a single path segment on the
      * wire: `sessions%2F01J...` (api.md 3.3).
@@ -191,6 +441,14 @@ final class HttpClient implements Client
         return implode('/', array_map('rawurlencode', explode('/', $path)));
     }
 
+    /**
+     * `refs/heads/main` and `main` name the same branch.
+     */
+    public static function shortRef(string $ref): string
+    {
+        return str_starts_with($ref, 'refs/heads/') ? substr($ref, strlen('refs/heads/')) : $ref;
+    }
+
     private function fileUrl(string $namespace, string $repo, string $ref, string $path): string
     {
         return $this->url('namespaces/'.rawurlencode($namespace)
@@ -199,14 +457,21 @@ final class HttpClient implements Client
             .'/'.self::encodePath($path));
     }
 
+    private function sessionUrl(string $namespace, string $repo, string $sessionId): string
+    {
+        return $this->url('namespaces/'.rawurlencode($namespace)
+            .'/repos/'.rawurlencode($repo)
+            .'/sessions/'.rawurlencode($sessionId));
+    }
+
     private function url(string $path): string
     {
         return rtrim((string) ($this->config['url'] ?? ''), '/').'/v1/'.$path;
     }
 
-    private function request(): PendingRequest
+    private function request(string $accept = 'application/json'): PendingRequest
     {
-        $request = Http::acceptJson()
+        $request = Http::accept($accept)
             ->timeout((float) ($this->config['timeout'] ?? 30));
 
         $token = (string) ($this->config['token'] ?? '');

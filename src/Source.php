@@ -20,6 +20,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static void assertWritten(string $path)
  * @method static void assertNothingWritten(string $path)
  * @method static void assertNothingCommitted()
+ * @method static void assertReverted(string $commitOid)
  *
  * @see SourceManager
  */

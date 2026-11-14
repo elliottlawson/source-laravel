@@ -6,6 +6,7 @@ namespace Source;
 
 use Closure;
 use Illuminate\Filesystem\FilesystemAdapter;
+use Illuminate\Support\LazyCollection;
 use League\Flysystem\Filesystem;
 use League\Flysystem\FilesystemAdapter as FlysystemAdapter;
 use League\Flysystem\FilesystemOperator;
@@ -93,6 +94,98 @@ class SourceFilesystem extends FilesystemAdapter
         return $this->store;
     }
 
+    // --- history -----------------------------------------------------------
+
+    /**
+     * The commit log, newest first.
+     *
+     * A LazyCollection: whole-repo history is paginated and pages are fetched
+     * as you iterate, so `->first()` costs one request.
+     *
+     * @return LazyCollection<int, Commit>
+     */
+    public function history(?string $path = null): LazyCollection
+    {
+        return $this->store->history($path);
+    }
+
+    /**
+     * A read-only disk pinned to a commit, a ref, or a date.
+     *
+     * ```php
+     * $disk->at($commit)->get('notes/plan.md');
+     * $disk->at('2026-11-01')->files('notes');
+     * ```
+     */
+    public function at(mixed $point): static
+    {
+        return $this->withStore($this->store->at($point));
+    }
+
+    /**
+     * The structured diff between two points in history.
+     */
+    public function diff(mixed $from, mixed $to, ?string $path = null): Diff
+    {
+        return $this->store->diff($from, $to, $path);
+    }
+
+    /**
+     * The same diff as unified text.
+     */
+    public function diffText(mixed $from, mixed $to, ?string $path = null): string
+    {
+        return $this->store->diffText($from, $to, $path);
+    }
+
+    /**
+     * Revert a commit with one new commit; one stale file refuses all of it.
+     */
+    public function revert(mixed $commit, ?string $message = null): CommitResult
+    {
+        return $this->store->revert($commit, $message);
+    }
+
+    // --- repos and branches ------------------------------------------------
+
+    /**
+     * The same disk pointed at another repo in the same namespace.
+     */
+    public function repo(string $name): static
+    {
+        return $this->withStore($this->store->withRepo($name));
+    }
+
+    /**
+     * A disk on another branch, creating a session branch from this disk's
+     * branch when the branch has no session yet.
+     */
+    public function branch(string $name): static
+    {
+        return $this->withStore($this->store->branch($name));
+    }
+
+    /**
+     * Merge this disk's session into a target branch.
+     */
+    public function mergeInto(string $target): MergeResult
+    {
+        return $this->store->mergeInto($target);
+    }
+
+    /**
+     * The session id behind this disk's branch, if there is one.
+     */
+    public function sessionId(): ?string
+    {
+        return $this->store->sessionId();
+    }
+
+    public function isReadOnly(): bool
+    {
+        return $this->store->isReadOnly();
+    }
+
     /**
      * A deep listing from the API has files only, so nested directories are
      * derived from the file paths (see SourceStore::directories()).
@@ -127,8 +220,11 @@ class SourceFilesystem extends FilesystemAdapter
     protected function withStore(SourceStore $store): static
     {
         $adapter = new SourceAdapter($store);
+        $config = $this->config;
+        $config['repo'] = $store->repo();
+        $config['branch'] = $store->branchName();
 
-        return new static(new Filesystem($adapter), $adapter, $this->config, $store);
+        return new static(new Filesystem($adapter), $adapter, $config, $store);
     }
 
     // --- error surface -----------------------------------------------------

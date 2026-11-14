@@ -6,8 +6,13 @@ namespace Source\Http;
 
 use Source\Author;
 use Source\Change;
+use Source\Commit;
+use Source\CommitPage;
 use Source\CommitResult;
+use Source\Diff;
 use Source\FileStat;
+use Source\MergeResult;
+use Source\Session;
 use Source\SourceFile;
 use Source\TreeEntry;
 
@@ -16,6 +21,9 @@ use Source\TreeEntry;
  *
  * The driver never talks HTTP itself, so swapping this for the in-memory fake
  * exercises the same retry and version-filling logic (see Source::fake()).
+ *
+ * The methods map one-to-one onto API endpoints: reads and the one write path
+ * for files, plus the log, the diff, the session and the merge endpoints.
  */
 interface Client
 {
@@ -49,4 +57,68 @@ interface Client
         ?Author $author,
         array $changes,
     ): CommitResult;
+
+    /**
+     * One page of the commit log, newest first.
+     *
+     * `$cursor` is the previous page's `nextCursor`; `$path` filters the log
+     * to commits that changed that path (or anything under it).
+     */
+    public function log(
+        string $namespace,
+        string $repo,
+        string $ref,
+        ?string $path = null,
+        ?string $cursor = null,
+        int $limit = 200,
+    ): CommitPage;
+
+    /**
+     * One commit, by ref or by commit id.
+     */
+    public function commit(string $namespace, string $repo, string $ref): Commit;
+
+    /**
+     * The structured diff between two refs or commit ids.
+     */
+    public function diff(string $namespace, string $repo, string $from, string $to, ?string $path = null): Diff;
+
+    /**
+     * The same diff as unified text.
+     */
+    public function diffText(string $namespace, string $repo, string $from, string $to, ?string $path = null): string;
+
+    /**
+     * The live session for a branch, or null when the branch has none.
+     */
+    public function findSession(string $namespace, string $repo, string $ref): ?Session;
+
+    /**
+     * Create a session branch from a ref.
+     */
+    public function createSession(string $namespace, string $repo, string $from, string $ref): Session;
+
+    /**
+     * Merge a session into a branch. Throws MergeConflict on a 409.
+     */
+    public function merge(string $namespace, string $repo, string $sessionId, string $target): MergeResult;
+
+    /**
+     * Resolve every conflicted path of a merge in one call.
+     *
+     * @param  array<string, string>  $resolutions  path => ours|theirs|delete|contents
+     */
+    public function resolveMerge(
+        string $namespace,
+        string $repo,
+        string $sessionId,
+        string $mergeId,
+        array $resolutions,
+        ?string $message = null,
+    ): MergeResult;
+
+    /**
+     * Abort a conflicted merge.
+     */
+    public function abortMerge(string $namespace, string $repo, string $sessionId, ?string $mergeId = null): Session;
 }
