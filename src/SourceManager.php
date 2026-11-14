@@ -66,11 +66,28 @@ class SourceManager
     /**
      * Swap the transport for an in-memory server that follows the same rules.
      *
-     * Call this before resolving disks.
+     * Calling it twice returns the same fake: a disk resolved after the first
+     * call keeps working. Use restore() to drop the fake between tests.
      */
     public function fake(): FakeClient
     {
-        return $this->fake = new FakeClient;
+        if ($this->fake !== null) {
+            return $this->fake;
+        }
+
+        $this->fake = new FakeClient;
+        $this->forgetSourceDisks();
+
+        return $this->fake;
+    }
+
+    /**
+     * Stop faking: the next disk resolves against the real transport.
+     */
+    public function restore(): void
+    {
+        $this->fake = null;
+        $this->forgetSourceDisks();
     }
 
     public function isFaking(): bool
@@ -85,6 +102,27 @@ class SourceManager
         }
 
         return $this->fake;
+    }
+
+    /**
+     * Forget disks already resolved by the filesystem manager, so a disk
+     * resolved after fake() uses the fake.
+     */
+    protected function forgetSourceDisks(): void
+    {
+        try {
+            $manager = $this->app->make('filesystem');
+            $disks = (array) $this->app->make('config')->get('filesystems.disks', []);
+
+            foreach ($disks as $name => $config) {
+                if (is_array($config) && ($config['driver'] ?? null) === 'source') {
+                    $manager->forgetDisk($name);
+                }
+            }
+        } catch (Throwable) {
+            // No filesystem manager (a bare container): nothing cached to
+            // forget.
+        }
     }
 
     // --- author ------------------------------------------------------------

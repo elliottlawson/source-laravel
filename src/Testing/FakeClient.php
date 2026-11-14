@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Source\Testing;
 
+use Closure;
 use Source\Author;
 use Source\Change;
 use Source\ChangedBy;
@@ -44,6 +45,28 @@ final class FakeClient implements Client
     private ?string $lastRepoKey = null;
 
     private int $clock = 1_700_000_000;
+
+    /**
+     * A hook that runs before every write, so a test can interleave another
+     * writer between the driver's version read and its send.
+     *
+     * @var (Closure(self): void)|null
+     */
+    private ?Closure $writeHook = null;
+
+    private bool $inHook = false;
+
+    /**
+     * Run the hook before each write. Pass null to remove it.
+     *
+     * @param  (Closure(self): void)|null  $hook
+     */
+    public function beforeWrite(?Closure $hook): static
+    {
+        $this->writeHook = $hook;
+
+        return $this;
+    }
 
     // --- Client ------------------------------------------------------------
 
@@ -143,6 +166,8 @@ final class FakeClient implements Client
 
         $key = $this->key($namespace, $repo, $ref);
         $this->lastRepoKey = $key;
+
+        $this->runWriteHook();
 
         $current = $this->files[$key] ?? [];
 
@@ -326,6 +351,21 @@ final class FakeClient implements Client
     private function freshContents(string $path): string
     {
         return "Changed outside the disk: {$path} {$this->clock}\n";
+    }
+
+    private function runWriteHook(): void
+    {
+        if ($this->writeHook === null || $this->inHook) {
+            return;
+        }
+
+        $this->inHook = true;
+
+        try {
+            ($this->writeHook)($this);
+        } finally {
+            $this->inHook = false;
+        }
     }
 
     private function key(string $namespace, string $repo, string $ref): string

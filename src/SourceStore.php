@@ -307,6 +307,7 @@ class SourceStore
 
         throw $last;
     }
+
     // --- internals ---------------------------------------------------------
 
     /**
@@ -420,7 +421,13 @@ class SourceStore
                 continue;
             }
 
-            $trailers[] = $key.': '.$this->trailerValue($value);
+            $key = $this->sanitizeTrailer((string) $key);
+
+            if ($key === '') {
+                continue;
+            }
+
+            $trailers[] = $key.': '.$this->sanitizeTrailer($this->trailerValue($value));
         }
 
         if ($trailers === []) {
@@ -445,6 +452,15 @@ class SourceStore
         }
 
         return (string) json_encode($value);
+    }
+
+    /**
+     * A trailer is one line: a value with newlines would break the message
+     * format the CLI and history read back.
+     */
+    protected function sanitizeTrailer(string $value): string
+    {
+        return trim((string) preg_replace('/\s+/u', ' ', $value));
     }
 
     protected function defaultAuthor(): ?Author

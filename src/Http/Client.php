@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Source\Http;
 
 use Source\Author;
+use Source\Change;
 use Source\CommitResult;
 use Source\FileStat;
 use Source\SourceFile;
@@ -38,7 +39,7 @@ interface Client
     /**
      * Send one all-or-nothing batch commit. This is the only write path.
      *
-     * @param  list<\Source\Change>  $changes
+     * @param  list<Change>  $changes
      */
     public function sendChanges(
         string $namespace,

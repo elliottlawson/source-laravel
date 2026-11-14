@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static \Source\Testing\FakeClient fake()
  * @method static bool isFaking()
  * @method static \Source\Testing\FakeClient fakeOrFail()
+ * @method static void restore()
  * @method static \Source\Author|null resolveAuthor()
  * @method static \Source\SourceManager resolveAuthorUsing(\Closure|null $resolver)
  * @method static void assertCommitted(string $message)

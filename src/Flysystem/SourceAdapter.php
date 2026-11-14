@@ -19,6 +19,7 @@ use League\Flysystem\UnableToRetrieveMetadata;
 use League\Flysystem\UnableToSetVisibility;
 use League\Flysystem\UnableToWriteFile;
 use Source\Exceptions\SourceException;
+use Source\FileStat;
 use Source\SourceStore;
 use Source\Support\Contents;
 
@@ -188,7 +189,7 @@ final class SourceAdapter implements FilesystemAdapter
         throw UnableToSetVisibility::atLocation($path, 'source does not store visibility.');
     }
 
-    private function stat(string $path): \Source\FileStat
+    private function stat(string $path): FileStat
     {
         try {
             $stat = $this->store->stat($path);

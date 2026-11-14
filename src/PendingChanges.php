@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Source;
 
+use Source\Support\Contents;
+
 /**
  * The pending-changes object handed to a commit() closure.
  *
@@ -22,7 +24,7 @@ class PendingChanges
      */
     public function put(string $path, mixed $contents): static
     {
-        return $this->stage(new PendingChange($path, \Source\Support\Contents::toString($contents)));
+        return $this->stage(new PendingChange($path, Contents::toString($contents)));
     }
 
     /**
