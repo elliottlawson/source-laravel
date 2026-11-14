@@ -8,9 +8,8 @@ the file's version, writes against that version, and retries if another writer
 lands in between. The package also exposes the version rules the store is
 built on, because some writes should not be last-write-wins.
 
-This is the first slice: the disk, versions, strict writes, batch commits,
-authors, metadata and the fake. History, diff, revert and branches are not in
-it yet.
+This is the disk, versions, strict writes, batch commits, authors, metadata,
+history, reading the past, diffs, reverts, repos, branches and the fake.
 
 ## Setup
 
@@ -140,15 +139,83 @@ Source::resolveAuthorUsing(fn () => auth()->user());
 Metadata is recorded as Git commit trailers appended to the message after a
 blank line (`Key: value`). The author goes in the commit's `author` field.
 
+## History and the past
+
+```php
+$disk->history('notes/plan.md');   // Collection of commits for one path
+$disk->history();                  // whole repo, paginated
+
+$disk->at($commit)->get('notes/plan.md');
+$disk->at('2026-11-01')->files('notes');    // the tree as it was
+$disk->diff($from, $to, 'notes/plan.md');
+```
+
+`history()` returns a `LazyCollection` of `Source\Commit`, newest first. Pages
+are fetched as you iterate, so `->first()` costs one request and stopping early
+fetches nothing more. Whole-repo history follows the server's `next_cursor`;
+a path filter uses the log's `path` parameter. Each commit carries `->oid`,
+`->message` (with the trailers stripped), `->meta` (the trailer block parsed
+back into an array), `->author`, `->at` (a `CarbonImmutable`), `->parents`, and
+`->subject()`.
+
+`at()` returns a read-only disk pinned to a commit, a ref, or a date. Every
+ordinary read works on it (`get`, `exists`, `files`, `directories`, ...); every
+write throws `Source\Exceptions\ReadOnlyDisk`.
+
+A date means the last commit on this branch at or before that time, so
+`at('2026-11-01')` is the tree at the start of the day. Bare dates are parsed
+in the app's timezone. A *version* (a blob id) is not a point in tree history:
+`at($version)` is refused with an `InvalidArgumentException` saying so, because
+the same file can have the same blob in many commits. Pass the commit id.
+
+`diff()` returns `Source\Diff`: `->from`, `->to` (the commit ids the server
+resolved), and `->files` of `Source\DiffFile` (`->path`, `->status`, `->oldPath`
+for a rename, `->binary`, `->additions`, `->deletions`, `->hunks`). Statuses are
+`added`, `modified`, `deleted`, `renamed`, `copied`, `mode_changed` and
+`type_changed`. `diffText()` returns the same diff as unified text, and
+`->path` limits either to a file or a directory.
+
+## Revert
+
+```php
+$disk->revert($commit);
+$disk->revert($commit, 'Roll back the Q3 draft');
+```
+
+A revert is one new commit that writes each file back to its version from the
+commit's first parent, expecting the version the commit produced: a modified
+file gets its old contents back, a deleted file is recreated, a file the commit
+added is deleted. The default message is `Revert "<subject>"` with a
+`Reverts: <oid>` trailer.
+
+It is the flip side of a strict write: if **any** of those files changed since,
+the whole revert is refused with `FileChanged`, nothing is retried, and nothing
+lands partially. A root commit and a merge commit are refused up front with
+`Source\Exceptions\CannotRevert`, because neither has one earlier tree to go
+back to.
+
+## Repos
+
+```php
+$disk->repo('acme/alice')->put('notes/plan.md', $text);
+```
+
+`repo()` returns a copy of the same disk — connection, token, branch, author,
+metadata — pointed at another repo in the same namespace. The original disk is
+not mutated.
+
 ## Errors
 
 | Exception | When |
 | --- | --- |
 | `Source\Exceptions\FileChanged` | 409 `file_changed` |
-| `Source\Exceptions\MergeConflict` | 409 `merge_conflict` |
+| `Source\Exceptions\MergeConflict` | 409 `merge_conflict` (`->paths()`, `->resolve()`, `->abort()`) |
 | `Source\Exceptions\Conflict` | another 409 (`stale_base`, ...) |
 | `Source\Exceptions\FileTooLarge` | 413 (`->limitBytes`, `->actualBytes`) |
 | `Source\Exceptions\NotFound` | 404 |
+| `Source\Exceptions\ReadOnlyDisk` | a write on an `at()` disk |
+| `Source\Exceptions\CannotRevert` | a root or merge commit given to `revert()` |
+| `Source\Exceptions\NoSession` | `mergeInto()` on a branch with no session |
 | `Source\Exceptions\Unauthorized` | 401 |
 | `Source\Exceptions\Forbidden` | 403 |
 | `Source\Exceptions\ValidationFailed` | 422 |
@@ -163,6 +230,61 @@ exception above (a plain `put()` that loses three races throws `FileChanged`).
 The extras (`read()`, `version()`, `ifUnchanged()`, `ifMissing()`, `commit()`)
 always throw typed exceptions.
 
+## Advanced: branches
+
+Branches are Git-style: a branch is a session on the server, writes on it are
+ordinary commits, and merging is a real three-way merge. Most apps never need
+them, which is why they are not in the getting-started section.
+
+```php
+$draft = $disk->branch('draft');       // creates a session branch from main if needed
+$draft->put('notes/plan.md', $text);   // one commit on draft; main is untouched
+$draft->mergeInto('main');             // clean merge, fast-forward, or already merged
+```
+
+`branch()` returns a disk on that branch. It finds the branch's session with
+`GET /sessions?ref=` and creates one with `POST /sessions` when there is none,
+forking from the current disk's branch. The disk keeps the session id, which is
+what `mergeInto()` uses. Writes on the branch go through the same single write
+path as everywhere else, so the per-file version rules are unchanged.
+
+`mergeInto()` returns a `Source\MergeResult` (`->state`, `->fastForward`,
+`->alreadyMerged`, `->mergeOid`, `->targetTip`, ...) for a clean merge, a
+fast-forward, an already-merged session, or a strategy-resolved merge. A
+conflict throws `Source\Exceptions\MergeConflict`:
+
+```php
+use Source\Exceptions\MergeConflict;
+
+try {
+    $draft->mergeInto('main');
+} catch (MergeConflict $e) {
+    $e->paths();       // the conflicted paths
+    $e->details;       // the server's conflict payload, exactly as sent
+    $e->mergeId();     // the merge to resolve or abort
+
+    // Every path in one call: ours is the target's version, theirs the
+    // session's. A contents string is a hand-written resolution.
+    $e->resolve([
+        'notes/plan.md' => 'theirs',
+        'notes/old.md'  => 'delete',
+        'notes/new.md'  => "the merged text\n",
+    ]);
+
+    // or, to leave the target alone and keep the branch:
+    $e->abort();
+}
+```
+
+Resolving writes the merge commit on the session branch, so the target does not
+move until the next `mergeInto()`, which is then a fast-forward. `abort()`
+returns the session to `open` with the target untouched.
+
+The disk's own token writes the branch, like every other write. Creating the
+session mints a token for the branch, and the server refuses that unless the
+disk's token already covers the branch ref; a token scoped only to `main`
+therefore cannot use `branch()` at all (403 `forbidden`).
+
 ## Testing
 
 ```php
@@ -175,6 +297,7 @@ $disk->put('notes/plan.md', $plan);
 
 Source::assertCommitted('Create notes/plan.md');
 Source::assertWritten('notes/plan.md');
+Source::assertReverted($commit);                   // a commit carried Reverts: <oid>
 
 Source::fake()->simulateChange('notes/plan.md');   // the next strict write on it throws FileChanged
 ```
@@ -182,6 +305,12 @@ Source::fake()->simulateChange('notes/plan.md');   // the next strict write on i
 The fake replaces the transport, not the driver, so retries, version filling
 and all-or-nothing batches are the real code. Object ids are real Git blob ids
 (`sha1("blob <len>\0<content>")`).
+
+The fake models history too: commits are snapshots in a graph, so `history()`,
+`at()`, `diff()` and `revert()` read a real tree, and branches and merges go
+through the same rules as the server (a merge conflicts when both sides changed
+the same path to different contents since the merge base). Its diff hunks are
+whole-file replacements rather than minimal hunks; paths and statuses match.
 
 `Source::fake()` is idempotent: calling it twice returns the same fake, so a
 disk resolved after the first call keeps working. Call `Source::restore()` to
@@ -196,10 +325,15 @@ SOURCE_TEST_TOKEN=asm_tok_... \
 SOURCE_TEST_NAMESPACE=acme \
 SOURCE_TEST_REPO=workspace \
 SOURCE_TEST_BRANCH=main \
+SOURCE_TEST_REPO_OTHER=workspace-other \
 vendor/bin/pest
 ```
 
-Without those variables the live tests are skipped.
+Without those variables the live tests are skipped. `SOURCE_TEST_REPO_OTHER` is
+optional: without it the live `repo()` isolation case is skipped. The branch
+cases need a token whose write refs cover the branch names the tests use
+(`conformance/...`); with a `main`-only token those live cases are skipped with
+a message saying so.
 
 ## Notes
 
