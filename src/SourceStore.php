@@ -154,6 +154,20 @@ class SourceStore
         return $this->client->get($this->namespace, $this->repo, $this->ref, $path);
     }
 
+    /**
+     * Stream the bytes of one version by id, wherever the file is now.
+     *
+     * @return resource
+     */
+    public function object(string $version)
+    {
+        if (! preg_match('/^[0-9a-f]{40}$/', $version)) {
+            throw new InvalidArgumentException('A version is 40 lowercase hex characters.');
+        }
+
+        return $this->client->object($this->namespace, $this->repo, $version);
+    }
+
     public function stat(string $path): ?FileStat
     {
         return $this->client->head($this->namespace, $this->repo, $this->ref, $path);

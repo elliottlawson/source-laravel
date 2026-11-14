@@ -122,6 +122,14 @@ interface Client
     public function uploadBlobs(string $namespace, string $repo, array $blobs, int $concurrency = 4): array;
 
     /**
+     * Stream one blob by its id (`GET /objects/{oid}`), wherever or whether
+     * any path holds it now. Throws NotFound when the repo has no such object.
+     *
+     * @return resource
+     */
+    public function object(string $namespace, string $repo, string $oid);
+
+    /**
      * One page of the commit log, newest first.
      *
      * `$cursor` is the previous page's `nextCursor`; `$path` filters the log

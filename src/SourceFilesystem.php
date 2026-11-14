@@ -61,6 +61,19 @@ class SourceFilesystem extends FilesystemAdapter
     }
 
     /**
+     * Stream the bytes of one version by id.
+     *
+     * A version names content, not a place: this keeps working after the
+     * file is edited, moved or deleted, as long as the repo holds the blob.
+     *
+     * @return resource
+     */
+    public function object(string $version)
+    {
+        return $this->store->object($version);
+    }
+
+    /**
      * A strict write: it only lands if the file is still this version.
      */
     public function ifUnchanged(?string $version): PendingGuard

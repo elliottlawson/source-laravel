@@ -472,6 +472,21 @@ final class FakeClient implements Client
         return $present;
     }
 
+    public function object(string $namespace, string $repo, string $oid)
+    {
+        $held = $this->blobs[$namespace.'/'.$repo] ?? [];
+
+        if (! isset($held[$oid])) {
+            throw new NotFound("Object [{$oid}] does not exist.", ['resource' => 'object', 'id' => $oid]);
+        }
+
+        $stream = fopen('php://temp', 'r+');
+        fwrite($stream, $held[$oid]);
+        rewind($stream);
+
+        return $stream;
+    }
+
     /**
      * One blob upload (api.md 3.4.5): bytes now, commit later.
      *

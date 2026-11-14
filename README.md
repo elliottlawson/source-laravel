@@ -242,6 +242,52 @@ $disk->repo('acme/alice')->put('notes/plan.md', $text);
 metadata — pointed at another repo in the same namespace. The original disk is
 not mutated.
 
+## Reading a version by id
+
+```php
+$stream = $disk->object($version);   // a resource; the bytes are streamed
+```
+
+A version names content, not a place, so this keeps working after the file is
+edited, moved or deleted. It reads `GET /objects/{oid}` in the disk's repo
+only: another repo's version is `NotFound`. Use it for things that must show
+exactly what was stored at one moment, such as a chat attachment.
+
+## Operator: namespaces, repos and tokens
+
+An app that runs its own `source` holds the operator key and hands each disk
+a short-lived token scoped to one repo. The disk never sees the operator key.
+
+```php
+$operator = Source::operator([
+    'url' => env('SOURCE_URL'),
+    'operator_key' => env('SOURCE_OPERATOR_KEY'),
+]);
+
+$operator->ensureNamespace('acme');            // true if created, false if it existed
+$operator->ensureRepo('acme', 'alice');        // the same
+$token = $operator->mintToken('acme', 'alice', 'write', ['main'], ttl: 3600);
+$token->token;      // the secret, shown once
+$token->expiresAt;  // CarbonImmutable
+
+$disk = Storage::build([
+    'driver' => 'source', 'url' => env('SOURCE_URL'), 'token' => $token->token,
+    'namespace' => 'acme', 'repo' => 'alice',
+]);
+
+$operator->revokeToken($token->id);
+$operator->deleteRepo('acme', 'alice');        // a missing repo is not an error
+```
+
+Tokens last at most 24 hours (the server's cap), so cache one per repo for a
+little less than its TTL rather than minting per request. Under
+`Source::fake()`, `Source::operator()` returns an in-memory operator
+(`Source::fakeOperator()`, with `hasRepo()`, `tokens()` and
+`assertRepoCreated()`); it records tokens but does not enforce them.
+
+The live operator test runs with `SOURCE_TEST_URL` and
+`SOURCE_TEST_OPERATOR_KEY`; it creates a throwaway namespace.
+
 ## Errors
 
 | Exception | When |
