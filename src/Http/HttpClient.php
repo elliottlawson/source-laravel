@@ -33,7 +33,7 @@ final class HttpClient implements Client
     private readonly Backoff $backoff;
 
     /**
-     * @param  array{url?: string, token?: string, timeout?: int|float}  $config
+     * @param  array{url?: string, token?: string, timeout?: int|float, upload_timeout?: int|float}  $config
      */
     public function __construct(private readonly array $config, ?Backoff $backoff = null)
     {
@@ -160,7 +160,7 @@ final class HttpClient implements Client
         $key = IdempotencyKey::generate();
 
         return $this->backoff->run(function () use ($url, $body, $key): CommitResult {
-            $response = $this->request()
+            $response = $this->request(upload: true)
                 ->withHeaders(['Idempotency-Key' => $key])
                 ->asJson()
                 ->post($url, $body);
@@ -222,7 +222,7 @@ final class HttpClient implements Client
 
         return $this->backoff->run(function () use ($url, $payload, $headers): CommitResult {
             try {
-                $response = $this->request()
+                $response = $this->request(upload: true)
                     ->withHeaders($headers)
                     // Guzzle's own `expect` option, so curl sends the header
                     // it knows to wait on before uploading the body: a write
@@ -618,10 +618,22 @@ final class HttpClient implements Client
         return rtrim((string) ($this->config['url'] ?? ''), '/').'/v1/'.$path;
     }
 
-    private function request(string $accept = 'application/json'): PendingRequest
+    /**
+     * Seconds a request may take in total. Writes that carry file bytes get
+     * their own, longer budget: a 256 MiB file can't cross a slow uplink in
+     * the 30 seconds that suits every other call.
+     */
+    public function timeoutFor(bool $upload): float
+    {
+        return $upload
+            ? (float) ($this->config['upload_timeout'] ?? 600)
+            : (float) ($this->config['timeout'] ?? 30);
+    }
+
+    private function request(string $accept = 'application/json', bool $upload = false): PendingRequest
     {
         $request = Http::accept($accept)
-            ->timeout((float) ($this->config['timeout'] ?? 30));
+            ->timeout($this->timeoutFor($upload));
 
         $token = (string) ($this->config['token'] ?? '');
 

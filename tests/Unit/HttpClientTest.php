@@ -340,3 +340,15 @@ it('aborts a merge with its merge id', function () {
         && $request->url() === 'https://source.test/v1/namespaces/acme/repos/workspace/sessions/01JSESSION/abort'
         && $request['merge_id'] === '01JMERGE');
 });
+
+it('gives uploads their own, longer timeout', function () {
+    $client = new HttpClient(['url' => 'https://source.test']);
+
+    expect($client->timeoutFor(upload: false))->toBe(30.0)
+        ->and($client->timeoutFor(upload: true))->toBe(600.0);
+
+    $configured = new HttpClient(['url' => 'https://source.test', 'timeout' => 5, 'upload_timeout' => 90]);
+
+    expect($configured->timeoutFor(upload: false))->toBe(5.0)
+        ->and($configured->timeoutFor(upload: true))->toBe(90.0);
+});

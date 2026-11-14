@@ -38,6 +38,7 @@ history, reading the past, diffs, reverts, repos, branches and the fake.
 | `branch` | no | Defaults to `main`. |
 | `throw` | no | Defaults to **true** here, unlike Laravel's own disks. Set it to `false` for Laravel's "return false" behaviour. |
 | `timeout` | no | Request timeout in seconds. Defaults to 30. |
+| `upload_timeout` | no | Timeout in seconds for writes that carry file bytes (single-file `PUT` and batch commits). Defaults to 600. |
 
 The provider registers the driver with `Storage::extend('source', ...)`; package
 discovery picks it up. The disk is a
