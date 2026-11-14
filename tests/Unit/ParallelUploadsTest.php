@@ -138,6 +138,39 @@ it('uploads the files over 64 KiB and leaves the smaller ones inline', function 
         ->and($changes[2])->toBe(['path' => 'present.txt', 'expected_oid' => '', 'oid' => $presentOid]);
 });
 
+it('uploads identical bytes once and names every path that produces them', function () {
+    $body = str_repeat('d', 70_000);
+    $oid = Payload::blobOid($body);
+
+    $uploads = 0;
+    $commits = [];
+
+    Http::fake(function (Request $request) use (&$uploads, &$commits) {
+        if (str_contains($request->url(), '/objects/present')) {
+            return Http::response(['present' => []]);
+        }
+
+        if (str_contains($request->url(), '/blobs')) {
+            $uploads++;
+
+            return blobOkResponse($request);
+        }
+
+        $commits[] = $request->data();
+
+        return blobCommitOkResponse($request->data()['changes']);
+    });
+
+    blobStore()->commit('Duplicate bytes', function ($files) use ($body) {
+        $files->ifMissing()->put('first.bin', $body);
+        $files->ifMissing()->put('second.bin', $body);
+    });
+
+    expect($uploads)->toBe(1)
+        ->and($commits[0]['changes'][0])->toBe(['path' => 'first.bin', 'expected_oid' => '', 'oid' => $oid])
+        ->and($commits[0]['changes'][1])->toBe(['path' => 'second.bin', 'expected_oid' => '', 'oid' => $oid]);
+});
+
 it('re-uploads the refused paths after unknown_object and retries the commit once', function () {
     $body = str_repeat('u', 100_000);
     $oid = Payload::blobOid($body);
@@ -242,6 +275,7 @@ it('retries only the refused uploads of a wave after a 429', function () {
     }
 
     Sleep::assertSleptTimes(1);
+    Sleep::assertSlept(fn ($duration) => (int) $duration->totalSeconds === 3, 1);
 });
 
 it('gives up with UploadsBusy after four refused attempts', function () {

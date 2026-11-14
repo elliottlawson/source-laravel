@@ -125,6 +125,16 @@ final class ParallelBlobUploads implements Uploader
             }
         }
 
+        // Identical bytes are one blob: upload them once and name every path
+        // that produces them.
+        $byOid = [];
+
+        foreach ($upload as $path) {
+            $byOid[$oids[$path]] ??= $path;
+        }
+
+        $upload = array_values($byOid);
+
         $uploaded = [];
 
         if ($upload !== [] && $this->uploadsSupported) {
@@ -145,13 +155,18 @@ final class ParallelBlobUploads implements Uploader
         }
 
         $prepared = [];
+        $uploadedOids = [];
+
+        foreach (array_keys($uploaded) as $path) {
+            $uploadedOids[$oids[$path]] = true;
+        }
 
         foreach ($changes as $change) {
             $oid = $oids[$change->path] ?? null;
 
             $prepared[] = $oid !== null && (
                 (isset($present[$oid]) && ! isset($forceUpload[$change->path]))
-                || isset($uploaded[$change->path])
+                || isset($uploadedOids[$oid])
             )
                 ? $change->asReference($oid)
                 : $change;
