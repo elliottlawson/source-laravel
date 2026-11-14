@@ -21,7 +21,6 @@ use Source\FileStat;
 use Source\MergeResult;
 use Source\Session;
 use Source\SourceFile;
-use Source\Support\IdempotencyKey;
 use Source\Support\Payload;
 use Source\TreeEntry;
 
@@ -131,9 +130,8 @@ final class HttpClient implements Client
      * (`oid`), or deletes a path. Single-file writes do not come through here:
      * they stream over `putFile()`.
      *
-     * The request carries an `Idempotency-Key`; the same key is reused if the
-     * server asks us to back off with `429`, so the retry is recognised as the
-     * same write (api.md 1.5, 3.4.4).
+     * No `Idempotency-Key`, for the reason given on `putFile()`; with one, the
+     * server also reads the whole body before it can answer `429` (3.4.4).
      */
     public function sendChanges(
         string $namespace,
@@ -157,11 +155,8 @@ final class HttpClient implements Client
             .'/repos/'.rawurlencode($repo)
             .'/commits');
 
-        $key = IdempotencyKey::generate();
-
-        return $this->backoff->run(function () use ($url, $body, $key): CommitResult {
+        return $this->backoff->run(function () use ($url, $body): CommitResult {
             $response = $this->request(upload: true)
-                ->withHeaders(['Idempotency-Key' => $key])
                 ->asJson()
                 ->post($url, $body);
 
@@ -201,9 +196,15 @@ final class HttpClient implements Client
      * raw write without it (`411 length_required`) and uses it to refuse an
      * oversize or over-capacity write before reading anything.
      *
-     * The payload is rewound per attempt, so a `429` retry (same
-     * `Idempotency-Key`) or a driver-level retry after `409 file_changed` sends
-     * the same bytes again.
+     * The payload is rewound per attempt, so a `429` retry or a driver-level
+     * retry after `409 file_changed` sends the same bytes again.
+     *
+     * No `Idempotency-Key`. With one, the server must hash the body before it
+     * can recognise a replay, so it skips the pre-body version check and a
+     * stale write uploads the whole file to get its 409 (`rawput.go`). The
+     * key would buy nothing here: a `429` is refused before anything is
+     * written, so resending is safe, and the driver never retries a lost
+     * connection. Add a key back if it ever does.
      */
     public function putFile(
         string $namespace,
@@ -217,8 +218,7 @@ final class HttpClient implements Client
         ?string $mode = null,
     ): CommitResult {
         $url = $this->fileUrl($namespace, $repo, $ref, $path);
-        $key = IdempotencyKey::generate();
-        $headers = $this->rawHeaders($payload, $expectedOid, $message, $author, $mode, $key);
+        $headers = $this->rawHeaders($payload, $expectedOid, $message, $author, $mode);
 
         return $this->backoff->run(function () use ($url, $payload, $headers): CommitResult {
             try {
@@ -277,12 +277,10 @@ final class HttpClient implements Client
         string $message,
         ?Author $author,
         ?string $mode,
-        string $key,
     ): array {
         $headers = [
             'Content-Length' => (string) $payload->size(),
             'X-Source-Message' => rawurlencode($message),
-            'Idempotency-Key' => $key,
         ];
 
         if ($expectedOid === '') {

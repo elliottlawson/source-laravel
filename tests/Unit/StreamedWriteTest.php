@@ -91,8 +91,11 @@ it('sends one file as a raw PUT with its version, size and message in headers', 
         ->and($put->header('X-Source-Message')[0])->toContain('%20')
         ->and($put->body())->toBe('hello');
 
-    // A UUID is inside the API's idempotency-key alphabet (api.md 1.5).
-    expect($put->header('Idempotency-Key')[0])->toMatch('/^[A-Za-z0-9._:-]{8,255}$/');
+    // No Idempotency-Key: with one, the server can't refuse a stale version
+    // before the body (it must hash the body first), so a lost strict write
+    // would upload the whole file to get its 409. Nothing the driver retries
+    // needs a key: a 429 is refused before anything is written.
+    expect($put->hasHeader('Idempotency-Key'))->toBeFalse();
 });
 
 it('creates a missing file with If-None-Match: *', function () {
@@ -164,16 +167,14 @@ it('spools a non-seekable stream, sends its length, and can send it again', func
 
     $attempts = 0;
     $bodies = [];
-    $keys = [];
 
-    Http::fake(function (Request $request) use (&$attempts, &$bodies, &$keys) {
+    Http::fake(function (Request $request) use (&$attempts, &$bodies) {
         if ($request->method() === 'HEAD') {
             return Http::response('', 404);
         }
 
         $attempts++;
         $bodies[] = $request->body();
-        $keys[] = $request->header('Idempotency-Key')[0];
 
         return $attempts === 1
             ? Http::response([
@@ -198,13 +199,10 @@ it('spools a non-seekable stream, sends its length, and can send it again', func
     streamStore()->put('notes/pipe.txt', $reader);
 
     expect($attempts)->toBe(2)
-        ->and($bodies)->toBe(['bytes from a pipe', 'bytes from a pipe'])
-        // A last-write-wins retry is a different request: it names a new
-        // version, so it gets a fresh key (api.md 1.5, 3.4.4).
-        ->and($keys[0])->not->toBe($keys[1]);
+        ->and($bodies)->toBe(['bytes from a pipe', 'bytes from a pipe']);
 });
 
-it('waits out 429 and retries the same request with the same idempotency key', function () {
+it('waits out 429 and retries the same request', function () {
     $attempts = 0;
     $keys = [];
 
@@ -214,7 +212,7 @@ it('waits out 429 and retries the same request with the same idempotency key', f
         }
 
         $attempts++;
-        $keys[] = $request->header('Idempotency-Key')[0];
+        $keys[] = $request->hasHeader('Idempotency-Key');
 
         if ($attempts <= 2) {
             return Http::response([
@@ -233,7 +231,7 @@ it('waits out 429 and retries the same request with the same idempotency key', f
     streamStore()->put('notes/plan.md', 'hello');
 
     expect($attempts)->toBe(3)
-        ->and(array_unique($keys))->toHaveCount(1);
+        ->and($keys)->toBe([false, false, false]);
 
     Sleep::assertSleptTimes(2);
 });

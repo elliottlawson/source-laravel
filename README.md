@@ -357,8 +357,9 @@ a message saying so.
   change's bytes are hashed as a Git blob first, and one the repo already holds
   is sent as `{path, expected_oid, oid}` instead of its bytes (api.md 3.4.3).
   Re-committing unchanged content therefore uploads nothing.
-- Every write carries an `Idempotency-Key`. A `429` (`uploads_busy`, or
-  `rate_limited`) is answered by waiting `Retry-After` and sending the same
+- Writes carry no `Idempotency-Key`: with one, the server can't refuse a stale
+  version or a busy server before reading the body. A `429` (`uploads_busy`, or
+  `rate_limited`) is refused before anything is written, and is answered by waiting `Retry-After` and sending the same
   request again, up to four attempts; a `413` is never retried. The wait uses
   Laravel's `Sleep`, so `Sleep::fake()` in a test makes it instant.
 - A stream handed to `put()` is detached from the HTTP client after the

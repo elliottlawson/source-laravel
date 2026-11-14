@@ -13,7 +13,7 @@ use Source\Exceptions\RateLimited;
  *
  * The server refuses a write it cannot fit, with `Retry-After`, rather than
  * queueing it. The client's part of that contract is to wait and retry the same
- * request — same bytes, same `Idempotency-Key` — a bounded number of times. A
+ * request, with the same bytes, a bounded number of times. A
  * `413` is never retried: that request can never fit.
  *
  * The waits are real by default (`Sleep::for(...)->seconds()`), and a test can
