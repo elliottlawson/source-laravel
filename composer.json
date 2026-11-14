@@ -39,6 +39,9 @@
             "pestphp/pest-plugin": true
         }
     },
+    "scripts": {
+        "test": "pest"
+    },
     "minimum-stability": "stable",
     "prefer-stable": true
 }

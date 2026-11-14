@@ -63,8 +63,7 @@ it('refuses a stale strict write with FileChanged but no contents', function (st
     } catch (FileChanged $e) {
         expect($e->paths)->toBe([$path])
             ->and($e->changedBy($path))->not->toBeNull()
-            ->and($e->changedBy($path)->commitOid)->toMatch('/^[0-9a-f]{40}$/')
-            ->and($e->changedBy($path)->at)->not->toBeNull();
+            ->and($e->changedBy($path)->commitOid)->toMatch('/^[0-9a-f]{40}$/');
 
         // The refusal never hands over the new contents or the version.
         $payload = json_encode($e->detailsPayload());

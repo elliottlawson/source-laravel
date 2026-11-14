@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use League\Flysystem\UnableToReadFile;
 use League\Flysystem\UnableToWriteFile;
 use Source\Author;
 use Source\Exceptions\FileChanged;
@@ -213,6 +214,27 @@ it('honours the throw option and returns false instead', function () {
     expect($disk->put('a.md', "mine\n"))->toBeFalse();
 
     $fake->beforeWrite(null);
+});
+
+it('returns null and false instead of throwing when throw is off', function () {
+    config()->set('filesystems.disks.source_quiet', [
+        'driver' => 'source',
+        'namespace' => 'acme',
+        'repo' => 'workspace',
+        'throw' => false,
+    ]);
+
+    $disk = fakeDisk('source_quiet');
+
+    expect($disk->get('missing.md'))->toBeNull()
+        ->and($disk->delete('missing.md'))->toBeFalse();
+});
+
+it('throws for a missing file when throw is on', function () {
+    $disk = fakeDisk();
+
+    expect(fn () => $disk->get('missing.md'))
+        ->toThrow(UnableToReadFile::class);
 });
 
 it('stores uploads and streams through the driver', function () {

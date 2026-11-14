@@ -156,14 +156,14 @@ final class SourceAdapter implements FilesystemAdapter
 
     public function lastModified(string $path): FileAttributes
     {
-        $stat = $this->stat($path);
+        $stat = $this->stat($path, FileAttributes::ATTRIBUTE_LAST_MODIFIED);
 
         return new FileAttributes($path, $stat->size, null, $stat->lastModified ?? 0);
     }
 
     public function fileSize(string $path): FileAttributes
     {
-        return new FileAttributes($path, $this->stat($path)->size);
+        return new FileAttributes($path, $this->stat($path, FileAttributes::ATTRIBUTE_FILE_SIZE)->size);
     }
 
     public function mimeType(string $path): FileAttributes
@@ -189,16 +189,16 @@ final class SourceAdapter implements FilesystemAdapter
         throw UnableToSetVisibility::atLocation($path, 'source does not store visibility.');
     }
 
-    private function stat(string $path): FileStat
+    private function stat(string $path, string $attribute = FileAttributes::ATTRIBUTE_FILE_SIZE): FileStat
     {
         try {
             $stat = $this->store->stat($path);
         } catch (SourceException $e) {
-            throw UnableToRetrieveMetadata::fileSize($path, $e->getMessage(), $e);
+            throw UnableToRetrieveMetadata::create($path, $attribute, $e->getMessage(), $e);
         }
 
         if ($stat === null) {
-            throw UnableToRetrieveMetadata::fileSize($path, 'The file does not exist.');
+            throw UnableToRetrieveMetadata::create($path, $attribute, 'The file does not exist.');
         }
 
         return $stat;
