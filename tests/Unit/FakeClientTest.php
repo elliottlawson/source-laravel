@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 use Source\Change;
 use Source\Exceptions\FileChanged;
+use Source\Exceptions\UnknownObject;
+use Source\Exceptions\UploadsBusy;
 use Source\Testing\FakeClient;
 
 it('uses real git blob ids', function () {
@@ -45,4 +47,51 @@ it('lists every mismatched path and who changed it', function () {
     // Nothing landed.
     expect($fake->contents('a.md'))->toBe("a\n")
         ->and($fake->contents('b.md'))->toBe("b\n");
+});
+
+it('refuses a change that names a blob it does not hold', function () {
+    $fake = new FakeClient;
+
+    $fake->sendChanges('acme', 'workspace', 'main', 'Seed', null, [Change::put('a.md', '', "a\n")]);
+
+    $oid = FakeClient::oid("a\n");
+
+    expect($fake->presentObjects('acme', 'workspace', [$oid, str_repeat('f', 40)]))
+        ->toBe([$oid]);
+
+    try {
+        $fake->sendChanges('acme', 'workspace', 'main', 'By oid', null, [
+            Change::reference('b.md', '', str_repeat('f', 40)),
+        ]);
+
+        $this->fail('An unknown blob was accepted.');
+    } catch (UnknownObject $e) {
+        expect($e->paths())->toBe(['b.md'])
+            ->and($fake->contents('b.md'))->toBeNull();
+    }
+
+    // A blob the repo holds is accepted and stored as its bytes.
+    $fake->sendChanges('acme', 'workspace', 'main', 'By oid', null, [
+        Change::reference('b.md', '', $oid),
+    ]);
+
+    expect($fake->contents('b.md'))->toBe("a\n")
+        ->and($fake->hasReferenced('b.md'))->toBeTrue();
+});
+
+it('answers uploads_busy and then serves the same write', function () {
+    $fake = (new FakeClient)->simulateBusy(times: 2);
+
+    $fake->sendChanges('acme', 'workspace', 'main', 'One', null, [Change::put('a.md', '', "a\n")]);
+
+    expect($fake->contents('a.md'))->toBe("a\n");
+});
+
+it('throws UploadsBusy when every attempt is refused', function () {
+    $fake = (new FakeClient)->simulateBusy(times: 10);
+
+    expect(fn () => $fake->sendChanges('acme', 'workspace', 'main', 'One', null, [Change::put('a.md', '', "a\n")]))
+        ->toThrow(UploadsBusy::class);
+
+    expect($fake->contents('a.md'))->toBeNull();
 });

@@ -219,7 +219,9 @@ not mutated.
 | `Source\Exceptions\Unauthorized` | 401 |
 | `Source\Exceptions\Forbidden` | 403 |
 | `Source\Exceptions\ValidationFailed` | 422 |
-| `Source\Exceptions\RateLimited` | 429 (`->retryAfter`) |
+| `Source\Exceptions\UnknownObject` | 422 `unknown_object` (`->paths()`), after the one retry with bytes |
+| `Source\Exceptions\RateLimited` | 429 `rate_limited` (`->retryAfter`) |
+| `Source\Exceptions\UploadsBusy` | 429 `uploads_busy` (`->retryAfter`, `->scope`), after the bounded retries |
 
 All extend `SourceException`, which carries `->errorCode`, `->details` and
 `->requestId`.
@@ -245,8 +247,8 @@ $draft->mergeInto('main');             // clean merge, fast-forward, or already 
 `branch()` returns a disk on that branch. It finds the branch's session with
 `GET /sessions?ref=` and creates one with `POST /sessions` when there is none,
 forking from the current disk's branch. The disk keeps the session id, which is
-what `mergeInto()` uses. Writes on the branch go through the same single write
-path as everywhere else, so the per-file version rules are unchanged.
+what `mergeInto()` uses. Writes on the branch go through the same write paths as
+everywhere else, so the per-file version rules are unchanged.
 
 `mergeInto()` returns a `Source\MergeResult` (`->state`, `->fastForward`,
 `->alreadyMerged`, `->mergeOid`, `->targetTip`, ...) for a clean merge, a
@@ -297,9 +299,14 @@ $disk->put('notes/plan.md', $plan);
 
 Source::assertCommitted('Create notes/plan.md');
 Source::assertWritten('notes/plan.md');
+Source::assertUploaded('notes/plan.md');            // the bytes went as a raw PUT
+Source::assertReferenced('notes/summary.md');       // the commit named a blob instead of sending bytes
 Source::assertReverted($commit);                   // a commit carried Reverts: <oid>
 
 Source::fake()->simulateChange('notes/plan.md');   // the next strict write on it throws FileChanged
+Source::fake()->simulateBusy(times: 2);            // the next two writes answer 429 uploads_busy
+
+Sleep::fake();                                     // keep the 429 back-off instant
 ```
 
 The fake replaces the transport, not the driver, so retries, version filling
@@ -338,7 +345,20 @@ a message saying so.
 ## Notes
 
 - A plain write costs one extra round trip (a HEAD for the current version)
-  before its commit.
-- Writes currently travel as JSON (`content` for UTF-8, `content_base64`
-  otherwise). The single place to change to raw-bytes streaming is
-  `Source\Http\HttpClient::sendChanges()`.
+  before its write.
+- One file is written as its own stream: the bytes are the body of a raw
+  `PUT /files/{ref}/{path}` (api.md 3.4.2), with the version in `If-Match` (or
+  `If-None-Match: *`), the size in `Content-Length` and the message in
+  `X-Source-Message`. A string, a resource and a PSR-7 stream all work, and a
+  file is never read into memory: `$disk->putFileAs(...)` and
+  `$disk->writeStream(...)` of a large file cost a buffer, not the file size.
+- A delete, or a commit with more than one change, is one `POST /commits`. Each
+  change's bytes are hashed as a Git blob first, and one the repo already holds
+  is sent as `{path, expected_oid, oid}` instead of its bytes (api.md 3.4.3).
+  Re-committing unchanged content therefore uploads nothing.
+- Every write carries an `Idempotency-Key`. A `429` (`uploads_busy`, or
+  `rate_limited`) is answered by waiting `Retry-After` and sending the same
+  request again, up to four attempts; a `413` is never retried. The wait uses
+  Laravel's `Sleep`, so `Sleep::fake()` in a test makes it instant.
+- A stream handed to `put()` is detached from the HTTP client after the
+  request, so the transport never closes a file the caller still owns.

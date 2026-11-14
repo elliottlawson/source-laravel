@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Http\Client\Request;
+use Illuminate\Http\File;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Sleep;
 use Source\Author;
@@ -10,6 +11,7 @@ use Source\Exceptions\FileChanged;
 use Source\Exceptions\FileTooLarge;
 use Source\Exceptions\UploadsBusy;
 use Source\Http\HttpClient;
+use Source\Source;
 use Source\SourceStore;
 
 /*
@@ -295,6 +297,41 @@ it('never retries a 413', function () {
 
     expect($attempts)->toBe(1);
     Sleep::assertSleptTimes(0);
+});
+
+it('stores an uploaded file as a stream without the client closing it', function () {
+    $local = tempnam(sys_get_temp_dir(), 'source-');
+    $size = 1024 * 1024 + 7;
+    file_put_contents($local, str_repeat('x', $size));
+
+    Http::fake(function (Request $request) {
+        if ($request->method() === 'HEAD') {
+            return Http::response('', 404);
+        }
+
+        return Http::response(fileWriteResponse('uploads/report.bin', size: 1024 * 1024 + 7));
+    });
+
+    $disk = Source::disk([
+        'driver' => 'source',
+        'url' => 'https://source.test',
+        'token' => 'asm_tok_test',
+        'namespace' => 'acme',
+        'repo' => 'workspace',
+    ]);
+
+    $stored = $disk->putFileAs('uploads', new File($local), 'report.bin');
+
+    expect($stored)->toBe('uploads/report.bin');
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'PUT'
+        && $request->hasHeader('Content-Length', (string) $size));
+
+    // putFileAs closes the stream it opened; the transport must not have
+    // closed it first.
+    expect(is_file($local))->toBeTrue();
+
+    unlink($local);
 });
 
 it('sets the expected version on a strict write and never retries it', function () {
