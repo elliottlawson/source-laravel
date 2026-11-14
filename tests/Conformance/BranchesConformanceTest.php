@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Source\Exceptions\Forbidden;
 use Source\Exceptions\MergeConflict;
+use Source\Http\HttpClient;
 use Source\Source;
 use Source\SourceFilesystem;
 use Source\Tests\Conformance\Backends;
@@ -84,7 +85,7 @@ it('writes on a branch and merges it cleanly', function (string $backend) {
 
     $merge = $draft->mergeInto($target);
 
-    expect($merge->target)->toBe($target)
+    expect($merge->target)->toBe(HttpClient::shortRef($target))
         ->and($merge->state)->toBe('merged')
         ->and($merge->fastForward)->toBeTrue()
         ->and($disk->get($path))->toBe("draft\n");
@@ -113,7 +114,7 @@ it('reports a conflicting merge and resolves it', function (string $backend) {
     } catch (MergeConflict $e) {
         expect($e->paths())->toBe([$path])
             ->and($e->mergeId())->not->toBeNull()
-            ->and($e->target())->toBe($target)
+            ->and($e->target())->toBe(HttpClient::shortRef($target))
             ->and($e->conflicts())->toHaveCount(1)
             ->and($e->details['merge_base_oid'])->toMatch('/^[0-9a-f]{40}$/');
 
