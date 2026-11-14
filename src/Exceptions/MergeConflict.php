@@ -126,6 +126,10 @@ class MergeConflict extends SourceException
             throw new LogicException('This conflict was not raised by a disk merge, so it cannot resolve it.');
         }
 
+        if ($this->mergeId() === null) {
+            throw new LogicException('This conflict carries no merge id, so it cannot be resolved.');
+        }
+
         return ($this->resolver)($paths, $message);
     }
 
