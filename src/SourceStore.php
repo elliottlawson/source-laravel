@@ -134,14 +134,51 @@ class SourceStore
     }
 
     /**
+     * Directory paths under a prefix.
+     *
+     * A deep listing from the API has files only (`git ls-tree -r` lists
+     * blobs), so the nested directories are derived from the file paths. A
+     * shallow listing already carries its direct directories.
+     *
      * @return list<string>
      */
     public function directories(string $directory = '', bool $recursive = false): array
     {
-        return array_values(array_map(
-            fn (TreeEntry $entry) => $entry->path,
-            array_filter($this->listTree($directory, $recursive), fn (TreeEntry $entry) => $entry->isDirectory()),
-        ));
+        $root = trim($directory, '/');
+        $directories = [];
+
+        foreach ($this->listTree($root, $recursive) as $entry) {
+            if ($entry->isDirectory()) {
+                if ($entry->path !== $root) {
+                    $directories[$entry->path] = true;
+                }
+
+                continue;
+            }
+
+            if (! $recursive) {
+                continue;
+            }
+
+            $parent = str_contains($entry->path, '/')
+                ? substr($entry->path, 0, (int) strrpos($entry->path, '/'))
+                : '';
+
+            while ($parent !== '' && $parent !== $root) {
+                $directories[$parent] = true;
+
+                if (! str_contains($parent, '/')) {
+                    break;
+                }
+
+                $parent = substr($parent, 0, (int) strrpos($parent, '/'));
+            }
+        }
+
+        $paths = array_keys($directories);
+        sort($paths);
+
+        return $paths;
     }
 
     // --- writing -----------------------------------------------------------

@@ -174,6 +174,7 @@ it('lists files and directories from the tree', function (string $backend) {
             "{$prefix}/sub/c.md",
         ])
         ->and($disk->directories($prefix))->toBe(["{$prefix}/sub"])
+        ->and($disk->allDirectories($prefix))->toBe(["{$prefix}/sub"])
         ->and($disk->directoryExists("{$prefix}/sub"))->toBeTrue();
 })->with('source backends');
 

@@ -4,10 +4,9 @@ declare(strict_types=1);
 
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
-use League\Flysystem\UnableToReadFile;
-use League\Flysystem\UnableToWriteFile;
 use Source\Author;
 use Source\Exceptions\FileChanged;
+use Source\Exceptions\NotFound;
 use Source\Source;
 use Source\Testing\FakeClient;
 
@@ -170,7 +169,7 @@ it('retries a plain write when another writer lands in between', function () {
         ->and($disk->get('a.md'))->toBe("mine\n");
 });
 
-it('gives up after three attempts and wraps FileChanged', function () {
+it('gives up after three attempts and throws FileChanged', function () {
     $fake = Source::fake();
     $disk = Storage::disk('source');
     $other = Storage::disk('source_other');
@@ -187,9 +186,8 @@ it('gives up after three attempts and wraps FileChanged', function () {
     try {
         $disk->put('a.md', "mine\n");
         $this->fail('The write was accepted.');
-    } catch (UnableToWriteFile $e) {
-        expect($e->getPrevious())->toBeInstanceOf(FileChanged::class)
-            ->and($e->getPrevious()->paths)->toBe(['a.md']);
+    } catch (FileChanged $e) {
+        expect($e->paths)->toBe(['a.md']);
     }
 
     expect($attempts)->toBe(3);
@@ -234,7 +232,7 @@ it('throws for a missing file when throw is on', function () {
     $disk = fakeDisk();
 
     expect(fn () => $disk->get('missing.md'))
-        ->toThrow(UnableToReadFile::class);
+        ->toThrow(NotFound::class);
 });
 
 it('stores uploads and streams through the driver', function () {

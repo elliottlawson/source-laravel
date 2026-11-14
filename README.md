@@ -158,8 +158,10 @@ All extend `SourceException`, which carries `->errorCode`, `->details` and
 `->requestId`.
 
 The ordinary disk methods honour `throw`: with `throw => false` they return
-`false` the way Laravel's do. The extras (`read()`, `version()`,
-`ifUnchanged()`, `ifMissing()`, `commit()`) always throw typed exceptions.
+`false` the way Laravel's do. With `throw => true` a failure surfaces the typed
+exception above (a plain `put()` that loses three races throws `FileChanged`).
+The extras (`read()`, `version()`, `ifUnchanged()`, `ifMissing()`, `commit()`)
+always throw typed exceptions.
 
 ## Testing
 
