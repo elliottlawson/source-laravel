@@ -102,7 +102,9 @@ it('round-trips a file put from a stream', function (string $backend) {
 it('commits identical content by oid instead of sending it again', function (string $backend) {
     [$disk, , $prefix] = Backends::make($this, $backend);
 
-    $unchanged = "unchanged\n";
+    // Above the 64 KiB inline threshold, otherwise the bytes travel inline by
+    // design and no oid reference is involved.
+    $unchanged = streamingBody(128 * 1024);
     $a = "{$prefix}/notes/a.md";
     $b = "{$prefix}/notes/b.md";
 

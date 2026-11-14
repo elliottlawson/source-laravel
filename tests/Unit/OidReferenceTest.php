@@ -19,12 +19,15 @@ use Source\Uploads\OidWhenPresent;
 
 function oidStore(): SourceStore
 {
+    $client = new HttpClient(['url' => 'https://source.test', 'token' => 'asm_tok_test', 'timeout' => 5]);
+
     return new SourceStore(
-        new HttpClient(['url' => 'https://source.test', 'token' => 'asm_tok_test', 'timeout' => 5]),
+        $client,
         'acme',
         'workspace',
         'main',
         new Author('Elliott', 'elliott@example.com'),
+        uploader: new OidWhenPresent($client),
     );
 }
 
