@@ -292,6 +292,33 @@ little less than its TTL rather than minting per request. Under
 (`Source::fakeOperator()`, with `hasRepo()`, `tokens()` and
 `assertRepoCreated()`); it records tokens but does not enforce them.
 
+### A namespace-scoped key
+
+An app that is a tenant of a shared `source` should hold a key that stops at
+its own namespace instead of an instance-wide one. An instance-wide operator
+creates it once; the app stores the secret and uses it like any operator key:
+
+```php
+$admin = Source::operator(['url' => $url, 'operator_key' => $instanceKey]);
+$key = $admin->createOperatorKey('acme', 'uno');   // admin over acme only
+$key->secret;                                      // shown once, store it
+
+$operator = Source::operator(['url' => $url, 'operator_key' => $key->secret]);
+$operator->ensureNamespace('acme');   // false: a no-op for the key's own namespace
+$operator->ensureRepo('acme', 'alice');
+$operator->mintToken('acme', 'alice');
+```
+
+With a namespace-scoped key every call works inside its namespace and nowhere
+else: another namespace is `NotFound`, never a `Forbidden`, so a bug cannot
+prove another tenant exists. `ensureNamespace` is a no-op for the key's own
+namespace: the key cannot create namespaces, so the client asks whether the
+namespace it can see already exists and returns false when it does. Keys cannot
+be managed with a namespace-scoped key at all (`Forbidden`); `listOperatorKeys()`
+and `revokeOperatorKey()` need the instance-wide key. A config-derived key
+cannot be revoked over the API and `revokeOperatorKey()` throws `Conflict` with
+error code `operator_key_from_config`.
+
 The live operator test runs with `SOURCE_TEST_URL` and
 `SOURCE_TEST_OPERATOR_KEY`; it creates a throwaway namespace.
 

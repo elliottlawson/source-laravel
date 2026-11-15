@@ -8,6 +8,7 @@ use Carbon\CarbonImmutable;
 use PHPUnit\Framework\Assert as PHPUnit;
 use Source\IssuedToken;
 use Source\Operator\OperatorClient;
+use Source\OperatorKey;
 
 /**
  * The operator half of Source::fake(): namespaces, repos and tokens in memory.
@@ -28,6 +29,9 @@ final class FakeOperator implements OperatorClient
 
     /** @var array<string, true> */
     private array $revoked = [];
+
+    /** @var array<string, OperatorKey> id => key */
+    private array $operatorKeys = [];
 
     private int $ids = 0;
 
@@ -78,6 +82,55 @@ final class FakeOperator implements OperatorClient
     public function revokeToken(string $id): void
     {
         $this->revoked[$id] = true;
+    }
+
+    public function createOperatorKey(string $namespace, ?string $label = null): OperatorKey
+    {
+        $id = sprintf('key%023d', ++$this->ids);
+        $this->namespaces[$namespace] = true;
+
+        return $this->operatorKeys[$id] = new OperatorKey(
+            id: $id,
+            namespace: $namespace,
+            prefix: substr('asm_op_fake_'.$id, 0, 16),
+            origin: 'api',
+            label: $label,
+            createdAt: CarbonImmutable::now(),
+            revokedAt: null,
+            secret: 'asm_op_fake_'.$id.'_secret',
+        );
+    }
+
+    /**
+     * @return list<OperatorKey>
+     */
+    public function listOperatorKeys(): array
+    {
+        return array_values($this->operatorKeys);
+    }
+
+    public function revokeOperatorKey(string $id): void
+    {
+        $key = $this->operatorKeys[$id] ?? null;
+
+        if ($key === null) {
+            return;
+        }
+
+        $this->operatorKeys[$id] = new OperatorKey(
+            id: $key->id,
+            namespace: $key->namespace,
+            prefix: $key->prefix,
+            origin: $key->origin,
+            label: $key->label,
+            createdAt: $key->createdAt,
+            revokedAt: CarbonImmutable::now(),
+        );
+    }
+
+    public function operatorKey(string $id): ?OperatorKey
+    {
+        return $this->operatorKeys[$id] ?? null;
     }
 
     public function hasRepo(string $namespace, string $name): bool
