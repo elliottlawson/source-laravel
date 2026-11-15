@@ -144,8 +144,10 @@ final class HttpClient implements Client
      * (`oid`), or deletes a path. Single-file writes do not come through here:
      * they stream over `putFile()`.
      *
-     * No `Idempotency-Key`, for the reason given on `putFile()`; with one, the
-     * server also reads the whole body before it can answer `429` (3.4.4).
+     * Sent without an `Idempotency-Key`: `expected_oid` already refuses a
+     * duplicate commit, the batch is retried only after the blobs it names were
+     * uploaded again, and a key would make the server read the body before it
+     * can answer `429` (3.4.4).
      */
     public function sendChanges(
         string $namespace,
@@ -208,17 +210,22 @@ final class HttpClient implements Client
      * Version check, message, author and mode travel in headers, because the
      * body is the file. `Content-Length` is always sent — the server refuses a
      * raw write without it (`411 length_required`) and uses it to refuse an
-     * oversize or over-capacity write before reading anything.
+     * oversize or over-capacity write before reading anything. `X-Source-Oid`
+     * carries the body's Git blob id, so a body that does not hash to it is
+     * `422 oid_mismatch` and nothing is written.
      *
      * The payload is rewound per attempt, so a `429` retry or a driver-level
      * retry after `409 file_changed` sends the same bytes again.
      *
-     * No `Idempotency-Key`. With one, the server must hash the body before it
-     * can recognise a replay, so it skips the pre-body version check and a
-     * stale write uploads the whole file to get its 409 (`rawput.go`). The
-     * key would buy nothing here: a `429` is refused before anything is
-     * written, so resending is safe, and the driver never retries a lost
-     * connection. Add a key back if it ever does.
+     * `X-Source-Oid` and `Idempotency-Key` together are what make a raw write
+     * both retryable and refused early (api.md 1.5, 3.4.2): the idempotency
+     * hash is built from the declared oid, so a replay, a
+     * `409 idempotency_conflict` and the pre-body `409 file_changed` are all
+     * settled before the body is read. The key is one per attempt and is
+     * reused across this method's own `429` retries, which is safe because the
+     * server releases a key when the write it named was refused. A replay
+     * answers `200` with the original body and `Idempotent-Replay: true`, so it
+     * parses here like the first success.
      */
     public function putFile(
         string $namespace,
@@ -230,9 +237,14 @@ final class HttpClient implements Client
         string $message,
         ?Author $author = null,
         ?string $mode = null,
+        ?string $idempotencyKey = null,
     ): CommitResult {
         $url = $this->fileUrl($namespace, $repo, $ref, $path);
         $headers = $this->rawHeaders($payload, $expectedOid, $message, $author, $mode);
+
+        if ($idempotencyKey !== null && $idempotencyKey !== '') {
+            $headers['Idempotency-Key'] = $idempotencyKey;
+        }
 
         return $this->backoff->run(function () use ($url, $payload, $headers): CommitResult {
             try {
@@ -284,9 +296,9 @@ final class HttpClient implements Client
      * checked against it too. `Expect: 100-continue` lets a refusal (`403`,
      * `413`, `429`, `staging_full`, or "already held") arrive before the body.
      *
-     * No `Idempotency-Key`, for the same reason as `putFile()`: the upload is
-     * idempotent by content, and a key would make the server read the body
-     * before it could refuse a busy upload.
+     * No `Idempotency-Key`: the upload is idempotent by content, and a stored
+     * replay would freeze an expiry that a repeat upload exists to extend
+     * (3.4.5).
      */
     public function uploadBlob(string $namespace, string $repo, Payload $payload, ?string $oid = null): BlobUpload
     {
@@ -424,6 +436,12 @@ final class HttpClient implements Client
      * and its trailers fit in a header; the server decodes them with the same
      * rules RFC 3986 describes.
      *
+     * `X-Source-Oid` is the Git blob id of the body, hashed incrementally by
+     * `Payload` (a stream is never read into memory here). Sending it is what
+     * lets the server check the bytes, settle an `Idempotency-Key` replay and
+     * refuse a stale or busy write before it reads the body; a body that does
+     * not hash to it is `422 oid_mismatch` and nothing is written.
+     *
      * @return array<string, string>
      */
     private function rawHeaders(
@@ -435,6 +453,7 @@ final class HttpClient implements Client
     ): array {
         $headers = [
             'Content-Length' => (string) $payload->size(),
+            'X-Source-Oid' => $payload->oid(),
             'X-Source-Message' => rawurlencode($message),
         ];
 

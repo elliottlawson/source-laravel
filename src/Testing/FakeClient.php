@@ -51,8 +51,9 @@ use Source\Uploads\PendingBlob;
  * ordinary three-way merge does.
  *
  * The two write forms of api.md 3.4.2 are both here: `putFile()` is the raw
- * streamed PUT (it hashes the payload as Git does and counts the bytes as
- * uploaded), `sendChanges()` is the batch commit with inline bytes or `oid`
+ * streamed PUT (it hashes the payload as Git does, counts the bytes as
+ * uploaded, and honours `X-Source-Oid` and `Idempotency-Key` the way the server
+ * does), `sendChanges()` is the batch commit with inline bytes or `oid`
  * references. `presentObjects()` answers like the server: a blob the repo holds
  * from any commit it has recorded, or one uploaded to it through `/blobs` whose
  * grace period has not run out. A commit naming a blob it does not hold is a
@@ -142,6 +143,21 @@ final class FakeClient implements Client
     private int $stagingFull = 0;
 
     private string $stagingScope = 'repo';
+
+    /**
+     * How many more raw PUTs answer 422 oid_mismatch.
+     */
+    private int $oidMismatch = 0;
+
+    /**
+     * Stored raw PUT successes, by `repo@ref\0path\0Idempotency-Key`.
+     *
+     * @var array<string, array{hash: string, result: CommitResult}>
+     */
+    private array $idempotent = [];
+
+    /** @var list<array{path: string, key: string}> */
+    private array $replays = [];
 
     private readonly Backoff $backoff;
 
@@ -407,7 +423,16 @@ final class FakeClient implements Client
      *
      * The size and the Git blob id are computed from the payload exactly as the
      * server does, and the bytes are remembered as uploaded, so a test can tell
-     * a streamed write from one that travelled inside a commit body.
+     * a streamed write from one that travelled inside a commit body. The body
+     * must hash to the oid the write declared, or the answer is `422
+     * oid_mismatch` with nothing written.
+     *
+     * An `Idempotency-Key` behaves as api.md 1.5 describes for a raw write: the
+     * first success is stored with the request hash (the commit headers plus
+     * the declared oid) and a repeat of that key and that request answers the
+     * same result without committing again; the same key with a different
+     * request is `409 idempotency_conflict`. A refusal or an error releases
+     * the key, so the corrected retry may carry it.
      */
     public function putFile(
         string $namespace,
@@ -419,19 +444,59 @@ final class FakeClient implements Client
         string $message,
         ?Author $author = null,
         ?string $mode = null,
+        ?string $idempotencyKey = null,
     ): CommitResult {
-        return $this->backoff->run(function () use ($namespace, $repo, $ref, $path, $payload, $expectedOid, $message, $author, $mode): CommitResult {
+        $key = $idempotencyKey === null || $idempotencyKey === '' ? null : $idempotencyKey;
+        $hash = $this->requestHash($path, $expectedOid, $message, $author, $mode, $payload->oid());
+
+        // The key is scoped to the token, the method and the path (api.md 1.5);
+        // the fake has one token and one method, so the repo, the branch and the
+        // path are what make it unique here.
+        $slot = $key === null ? null : $this->key($namespace, $repo, $ref)."\0".$path."\0".$key;
+
+        // A replay is settled before the body is read, so it comes before the
+        // capacity check: there is nothing left to send.
+        if ($slot !== null && isset($this->idempotent[$slot])) {
+            $stored = $this->idempotent[$slot];
+
+            if ($stored['hash'] !== $hash) {
+                throw new Conflict(
+                    'The same Idempotency-Key was sent with a different request.',
+                    'idempotency_conflict',
+                    ['key' => $key, 'request_hash' => $hash],
+                );
+            }
+
+            $this->replays[] = ['path' => $path, 'key' => $key];
+
+            return $stored['result'];
+        }
+
+        return $this->backoff->run(function () use ($namespace, $repo, $ref, $path, $payload, $expectedOid, $message, $author, $mode, $slot, $hash): CommitResult {
             $this->busyCheck();
 
             $contents = $payload->contents();
+            $declared = $payload->oid();
 
-            if (Payload::blobOid($contents) !== $payload->oid()) {
-                throw new ValidationFailed('The payload changed while it was being sent.', 'validation_failed');
+            if ($this->oidMismatch > 0) {
+                $this->oidMismatch--;
+
+                throw new OidMismatch(
+                    'The raw PUT bytes do not hash to the oid the request declared.',
+                    ['expected_oid' => $declared, 'actual_oid' => str_repeat('0', 40)],
+                );
+            }
+
+            if (Payload::blobOid($contents) !== $declared) {
+                throw new OidMismatch(
+                    'The raw PUT bytes do not hash to the oid the request declared.',
+                    ['expected_oid' => $declared, 'actual_oid' => Payload::blobOid($contents)],
+                );
             }
 
             $this->uploads[$path][] = strlen($contents);
 
-            return $this->commitOnce(
+            $result = $this->commitOnce(
                 $namespace,
                 $repo,
                 $ref,
@@ -439,6 +504,14 @@ final class FakeClient implements Client
                 $author,
                 [Change::put($path, $expectedOid, $contents, $mode)],
             );
+
+            // Only a success is stored, and only now: a refusal or an error
+            // above released the key instead.
+            if ($slot !== null) {
+                $this->idempotent[$slot] = ['hash' => $hash, 'result' => $result];
+            }
+
+            return $result;
         });
     }
 
@@ -612,6 +685,33 @@ final class FakeClient implements Client
         $this->stagingScope = $scope === 'server' ? 'server' : 'repo';
 
         return $this;
+    }
+
+    /**
+     * Answer the next `$times` raw PUTs with 422 oid_mismatch, as a server does
+     * when the bytes that arrive do not hash to the oid the request declared.
+     *
+     * The fake's own check cannot be reached otherwise: the declared oid comes
+     * from the payload, so the bytes always match unless a test says they did
+     * not. Nothing is written and the key is released, exactly as the server
+     * behaves (api.md 3.4.2).
+     */
+    public function simulateOidMismatch(int $times = 1): static
+    {
+        $this->oidMismatch = max(0, $times);
+
+        return $this;
+    }
+
+    /**
+     * The raw PUTs that were answered from a stored key instead of running
+     * again, in order.
+     *
+     * @return list<array{path: string, key: string}>
+     */
+    public function replays(): array
+    {
+        return $this->replays;
     }
 
     /**
@@ -1790,6 +1890,32 @@ final class FakeClient implements Client
     private function key(string $namespace, string $repo, string $ref): string
     {
         return "{$namespace}/{$repo}@{$ref}";
+    }
+
+    /**
+     * The request hash an `Idempotency-Key` is checked against (api.md 1.5).
+     *
+     * For a raw write it covers the commit headers and the blob's object id —
+     * the oid the request declared — which is what lets the server settle a
+     * replay before the body is read.
+     */
+    private function requestHash(
+        string $path,
+        string $expectedOid,
+        string $message,
+        ?Author $author,
+        ?string $mode,
+        string $declaredOid,
+    ): string {
+        return sha1(implode("\0", [
+            $path,
+            $expectedOid,
+            $message,
+            $author?->name ?? '',
+            $author?->email ?? '',
+            $mode ?? '',
+            $declaredOid,
+        ]));
     }
 
     /**

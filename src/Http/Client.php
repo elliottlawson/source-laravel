@@ -70,6 +70,13 @@ interface Client
      *
      * The payload streams: a resource is never read into memory. `$expectedOid`
      * is the version being replaced; `''` means the path must not exist yet.
+     *
+     * The body's Git blob id travels as `X-Source-Oid`, and `$idempotencyKey`
+     * as `Idempotency-Key` (api.md 1.5): together they let the server settle a
+     * replay and the stale-write check before it reads the body. One key
+     * belongs to one attempt — the caller makes a new one per attempt and
+     * reuses it for every transport-level retry of that attempt. `null` sends
+     * no key, which is only right for a request that is never retried.
      */
     public function putFile(
         string $namespace,
@@ -81,6 +88,7 @@ interface Client
         string $message,
         ?Author $author = null,
         ?string $mode = null,
+        ?string $idempotencyKey = null,
     ): CommitResult;
 
     /**

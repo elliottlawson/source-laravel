@@ -8,6 +8,7 @@ use Carbon\CarbonImmutable;
 use Closure;
 use DateTimeInterface;
 use Illuminate\Support\LazyCollection;
+use Illuminate\Support\Str;
 use InvalidArgumentException;
 use Source\Exceptions\CannotRevert;
 use Source\Exceptions\Conflict;
@@ -740,6 +741,12 @@ class SourceStore
     /**
      * One file, streamed: the payload goes as the request body and never into
      * memory.
+     *
+     * The key is minted here, once per attempt, and never reused: a
+     * last-write-wins retry re-reads the version and sends a different
+     * request, and a success stored under the old key would make it a
+     * `409 idempotency_conflict`. The transport keeps this one for its own
+     * `429` retries, where the request is byte for byte the same.
      */
     protected function sendFile(string $message, Change $change, ?Author $author): CommitResult
     {
@@ -756,6 +763,7 @@ class SourceStore
                 $message,
                 $author,
                 $change->mode,
+                Str::uuid()->toString(),
             );
         } finally {
             $payload->release();

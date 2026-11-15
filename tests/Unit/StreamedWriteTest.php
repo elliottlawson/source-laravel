@@ -13,6 +13,7 @@ use Source\Exceptions\UploadsBusy;
 use Source\Http\HttpClient;
 use Source\Source;
 use Source\SourceStore;
+use Source\Support\Payload;
 
 /*
  * The raw-bytes write path (api.md 3.4.2): one file's bytes are the request
@@ -91,11 +92,12 @@ it('sends one file as a raw PUT with its version, size and message in headers', 
         ->and($put->header('X-Source-Message')[0])->toContain('%20')
         ->and($put->body())->toBe('hello');
 
-    // No Idempotency-Key: with one, the server can't refuse a stale version
-    // before the body (it must hash the body first), so a lost strict write
-    // would upload the whole file to get its 409. Nothing the driver retries
-    // needs a key: a 429 is refused before anything is written.
-    expect($put->hasHeader('Idempotency-Key'))->toBeFalse();
+    // Both halves of the idempotency contract travel with every raw write: the
+    // body's blob id, so a mismatch and a stale version are refused before the
+    // body is read, and one key per attempt, reused by the transport across
+    // its own 429 retries.
+    expect($put->hasHeader('Idempotency-Key'))->toBeTrue()
+        ->and($put->hasHeader('X-Source-Oid', Payload::blobOid('hello')))->toBeTrue();
 });
 
 it('creates a missing file with If-None-Match: *', function () {
@@ -212,7 +214,7 @@ it('waits out 429 and retries the same request', function () {
         }
 
         $attempts++;
-        $keys[] = $request->hasHeader('Idempotency-Key');
+        $keys[] = $request->header('Idempotency-Key')[0] ?? null;
 
         if ($attempts <= 2) {
             return Http::response([
@@ -231,7 +233,10 @@ it('waits out 429 and retries the same request', function () {
     streamStore()->put('notes/plan.md', 'hello');
 
     expect($attempts)->toBe(3)
-        ->and($keys)->toBe([false, false, false]);
+        // The same request, so the same key: the server released it when it
+        // refused the first two attempts.
+        ->and(array_unique($keys))->toHaveCount(1)
+        ->and($keys[0])->not->toBeNull();
 
     Sleep::assertSleptTimes(2);
 });

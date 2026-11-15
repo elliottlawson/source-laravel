@@ -127,8 +127,15 @@ and throws `FileChanged`, exactly as the server does.
 ## Uploads
 
 A single file is a stream: its bytes are the body of a raw
-`PUT .../files/{ref}/{path}` (api.md 3.4.2), never a JSON string. A delete, or a
-commit with more than one change, takes a different path (api.md 3.4.5):
+`PUT .../files/{ref}/{path}` (api.md 3.4.2), never a JSON string. The body's Git
+blob id travels as `X-Source-Oid` and one `Idempotency-Key` goes with each
+attempt. Together they let the server settle a replay (`Idempotent-Replay:
+true`, which the driver reads as the first success), a stale version
+(`409 file_changed`) and a busy server (`429`) before it reads the body. The key
+is new for every attempt and reused by the transport across that attempt's own
+`429` retries; a re-read-and-rewrite after `file_changed` is a new attempt with
+a new key. A delete, or a commit with more than one change, takes a different
+path (api.md 3.4.5):
 
 1. every put is hashed as a Git blob, and `POST /objects/present` says which
    blobs the repo already holds (in chunks of 1000);
@@ -294,7 +301,7 @@ The live operator test runs with `SOURCE_TEST_URL` and
 | --- | --- |
 | `Source\Exceptions\FileChanged` | 409 `file_changed` |
 | `Source\Exceptions\MergeConflict` | 409 `merge_conflict` (`->paths()`, `->resolve()`, `->abort()`) |
-| `Source\Exceptions\Conflict` | another 409 (`stale_base`, ...) |
+| `Source\Exceptions\Conflict` | another 409 (`stale_base`, `idempotency_conflict`, `idempotency_in_progress`, ...) |
 | `Source\Exceptions\FileTooLarge` | 413 (`->limitBytes`, `->actualBytes`) |
 | `Source\Exceptions\NotFound` | 404 |
 | `Source\Exceptions\ReadOnlyDisk` | a write on an `at()` disk |
@@ -304,7 +311,7 @@ The live operator test runs with `SOURCE_TEST_URL` and
 | `Source\Exceptions\Forbidden` | 403 |
 | `Source\Exceptions\ValidationFailed` | 422 |
 | `Source\Exceptions\UnknownObject` | 422 `unknown_object` (`->paths()`), after the one retry with fresh uploads |
-| `Source\Exceptions\OidMismatch` | 422 `oid_mismatch` (`->expectedOid`, `->actualOid`), never retried |
+| `Source\Exceptions\OidMismatch` | 422 `oid_mismatch` (`->expectedOid`, `->actualOid`) on a blob upload or a raw file write, never retried |
 | `Source\Exceptions\StagingFull` | 409 `staging_full` (`->scope`, `->limitBytes`, `->stagedBytes`, `->nextExpiryAt`), never retried |
 | `Source\Exceptions\RateLimited` | 429 `rate_limited` (`->retryAfter`) |
 | `Source\Exceptions\UploadsBusy` | 429 `uploads_busy` (`->retryAfter`, `->scope`), after the bounded retries |
@@ -393,14 +400,20 @@ Source::assertReverted($commit);                   // a commit carried Reverts: 
 Source::fake()->simulateChange('notes/plan.md');   // the next strict write on it throws FileChanged
 Source::fake()->simulateBusy(times: 2);            // the next two writes answer 429 uploads_busy
 Source::fake()->simulateStagingFull(times: 1);     // the next upload answers 409 staging_full
+Source::fake()->simulateOidMismatch(times: 1);     // the next raw write's bytes don't hash to its oid
 Source::fake()->expireUploads();                   // staged blobs expire, as after the 24h grace period
+Source::fake()->replays();                         // raw writes answered from a stored idempotency key
 
 Sleep::fake();                                     // keep the 429 back-off instant
 ```
 
 The fake replaces the transport, not the driver, so retries, version filling
 and all-or-nothing batches are the real code. Object ids are real Git blob ids
-(`sha1("blob <len>\0<content>")`).
+(`sha1("blob <len>\0<content>")`). A raw write's `X-Source-Oid` and
+`Idempotency-Key` are modelled as well: bytes that do not hash to the declared
+oid throw `OidMismatch`, a repeat of a key with the same request answers the
+stored success without committing again (`->replays()`), the same key with a
+different request is `idempotency_conflict`, and a refusal releases the key.
 
 The fake models history too: commits are snapshots in a graph, so `history()`,
 `at()`, `diff()` and `revert()` read a real tree, and branches and merges go
@@ -437,18 +450,26 @@ a message saying so.
   before its write.
 - One file is written as its own stream: the bytes are the body of a raw
   `PUT /files/{ref}/{path}` (api.md 3.4.2), with the version in `If-Match` (or
-  `If-None-Match: *`), the size in `Content-Length` and the message in
-  `X-Source-Message`. A string, a resource and a PSR-7 stream all work, and a
-  file is never read into memory: `$disk->putFileAs(...)` and
+  `If-None-Match: *`), the size in `Content-Length`, the message in
+  `X-Source-Message`, the body's blob id in `X-Source-Oid` and one
+  `Idempotency-Key` per attempt. A string, a resource and a PSR-7 stream all
+  work, and a file is never held in memory: `$disk->putFileAs(...)` and
   `$disk->writeStream(...)` of a large file cost a buffer, not the file size.
+  Declaring `X-Source-Oid` costs one extra read of the bytes to hash them
+  (streamed, in 1 MiB chunks) before the write starts.
 - A `422 unknown_object` on the commit means an uploaded blob expired (24 hours)
   or GC took it in the gap; the driver uploads those paths again and retries the
   commit once (see "Uploads" above).
-- Writes and blob uploads carry no `Idempotency-Key`: with one, the server can't
-  refuse a stale version or a busy server before reading the body. A `429`
+- The `Idempotency-Key` on a raw write belongs to one attempt. A `429`
   (`uploads_busy`, or `rate_limited`) is refused before anything is written, and
-  is answered by waiting `Retry-After` and sending the same request again, up to
-  four attempts; a `413` is never retried. The wait uses Laravel's `Sleep`, so
-  `Sleep::fake()` in a test makes it instant.
+  is answered by waiting `Retry-After` and sending the same request again — same
+  bytes, same key — up to four attempts; a `413` is never retried. A
+  `409 file_changed` on a plain write is a different attempt: the driver reads
+  the version again and sends a new request with a new key, because a success
+  stored under the old one would make it a `409 idempotency_conflict`. The wait
+  uses Laravel's `Sleep`, so `Sleep::fake()` in a test makes it instant.
+- Blob uploads (`POST /blobs`) carry no key: the upload is already idempotent by
+  content, and a stored replay would freeze an expiry a repeat upload exists to
+  extend.
 - A stream handed to `put()` is detached from the HTTP client after the
   request, so the transport never closes a file the caller still owns.
