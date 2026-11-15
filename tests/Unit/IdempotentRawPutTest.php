@@ -17,8 +17,8 @@ use Source\SourceStore;
 use Source\Support\Payload;
 
 /*
- * A raw file write carries both halves of the idempotency contract (api.md
- * 1.5, 3.4.2): `X-Source-Oid` with the Git blob id of the body, so the server
+ * A raw file write carries both halves of the idempotency contract:
+ * `X-Source-Oid` with the Git blob id of the body, so the server
  * settles a replay and the stale-write check before it reads anything, and one
  * `Idempotency-Key` per attempt, reused by the transport across its own
  * retries.

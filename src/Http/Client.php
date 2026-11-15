@@ -66,13 +66,13 @@ interface Client
     ): CommitResult;
 
     /**
-     * Write one file with its bytes as the request body (api.md 3.4.2).
+     * Write one file with its bytes as the request body.
      *
      * The payload streams: a resource is never read into memory. `$expectedOid`
      * is the version being replaced; `''` means the path must not exist yet.
      *
      * The body's Git blob id travels as `X-Source-Oid`, and `$idempotencyKey`
-     * as `Idempotency-Key` (api.md 1.5): together they let the server settle a
+     * as `Idempotency-Key`: together they let the server settle a
      * replay and the stale-write check before it reads the body. One key
      * belongs to one attempt — the caller makes a new one per attempt and
      * reuses it for every transport-level retry of that attempt. `null` sends
@@ -92,7 +92,7 @@ interface Client
     ): CommitResult;
 
     /**
-     * Which of these blob ids the repo already holds (api.md 3.4.3).
+     * Which of these blob ids the repo already holds.
      *
      * The answer is a hint: the write path decides, so a blob reported present
      * may still come back as `422 unknown_object`.
@@ -103,7 +103,7 @@ interface Client
     public function presentObjects(string $namespace, string $repo, array $oids): array;
 
     /**
-     * Upload one blob without committing it (api.md 3.4.5).
+     * Upload one blob without committing it.
      *
      * The payload is the request body and streams: it is never buffered. `$oid`
      * is the Git blob id the caller computed; the server hashes the bytes again
@@ -117,7 +117,7 @@ interface Client
     public function uploadBlob(string $namespace, string $repo, Payload $payload, ?string $oid = null): BlobUpload;
 
     /**
-     * Upload several blobs concurrently with one pool (api.md 3.4.5).
+     * Upload several blobs concurrently with one pool.
      *
      * Results are keyed by `PendingBlob::$key`. A failed upload appears as the
      * Throwable it threw rather than aborting the whole pool, so the caller can

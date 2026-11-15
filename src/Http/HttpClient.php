@@ -147,7 +147,7 @@ final class HttpClient implements Client
      * Sent without an `Idempotency-Key`: `expected_oid` already refuses a
      * duplicate commit, the batch is retried only after the blobs it names were
      * uploaded again, and a key would make the server read the body before it
-     * can answer `429` (3.4.4).
+     * can answer `429`.
      */
     public function sendChanges(
         string $namespace,
@@ -204,8 +204,8 @@ final class HttpClient implements Client
     }
 
     /**
-     * One streamed file write: `PUT .../files/{ref}/{path}` with the file as the
-     * body (api.md 3.4.2).
+     * One streamed file write: `PUT .../files/{ref}/{path}` with the file as
+     * the body.
      *
      * Version check, message, author and mode travel in headers, because the
      * body is the file. `Content-Length` is always sent — the server refuses a
@@ -218,7 +218,7 @@ final class HttpClient implements Client
      * retry after `409 file_changed` sends the same bytes again.
      *
      * `X-Source-Oid` and `Idempotency-Key` together are what make a raw write
-     * both retryable and refused early (api.md 1.5, 3.4.2): the idempotency
+     * both retryable and refused early: the idempotency
      * hash is built from the declared oid, so a replay, a
      * `409 idempotency_conflict` and the pre-body `409 file_changed` are all
      * settled before the body is read. The key is one per attempt and is
@@ -289,7 +289,7 @@ final class HttpClient implements Client
     }
 
     /**
-     * One blob upload (api.md 3.4.5).
+     * One blob upload.
      *
      * Streamed, never buffered. `X-Source-Oid` is the oid we computed; the
      * server hashes the same bytes and refuses a mismatch, and the answer is
@@ -297,8 +297,7 @@ final class HttpClient implements Client
      * `413`, `429`, `staging_full`, or "already held") arrive before the body.
      *
      * No `Idempotency-Key`: the upload is idempotent by content, and a stored
-     * replay would freeze an expiry that a repeat upload exists to extend
-     * (3.4.5).
+     * replay would freeze an expiry that a repeat upload exists to extend.
      */
     public function uploadBlob(string $namespace, string $repo, Payload $payload, ?string $oid = null): BlobUpload
     {
@@ -318,7 +317,7 @@ final class HttpClient implements Client
     }
 
     /**
-     * One pooled wave of blob uploads (api.md 3.4.5).
+     * One pooled wave of blob uploads.
      *
      * `Http::pool` is curl multi underneath, so the bodies are in flight at the
      * same time rather than one after another. The pool's concurrency is the
@@ -430,7 +429,7 @@ final class HttpClient implements Client
     }
 
     /**
-     * The headers of a raw file write (api.md 3.4.2).
+     * The headers of a raw file write.
      *
      * The message and author are percent-encoded UTF-8 so a multi-line message
      * and its trailers fit in a header; the server decodes them with the same
@@ -764,7 +763,7 @@ final class HttpClient implements Client
 
     /**
      * Percent-encode a ref. `sessions/01J...` is a single path segment on the
-     * wire: `sessions%2F01J...` (api.md 3.3).
+     * wire: `sessions%2F01J...`.
      */
     public static function encodeRef(string $ref): string
     {

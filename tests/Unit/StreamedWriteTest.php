@@ -16,7 +16,7 @@ use Source\SourceStore;
 use Source\Support\Payload;
 
 /*
- * The raw-bytes write path (api.md 3.4.2): one file's bytes are the request
+ * The raw-bytes write path: one file's bytes are the request
  * body, everything else travels in headers, and a stream is never buffered.
  */
 

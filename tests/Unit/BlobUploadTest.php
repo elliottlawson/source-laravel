@@ -13,7 +13,7 @@ use Source\Support\Payload;
 use Source\Uploads\PendingBlob;
 
 /*
- * `POST /blobs` on the wire (api.md 3.4.5): the file is the streamed body, its
+ * `POST /blobs` on the wire: the file is the streamed body, its
  * oid travels beside it, and the answer is checked. The adapter is also where
  * staging_full and oid_mismatch become typed exceptions.
  */

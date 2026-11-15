@@ -34,11 +34,11 @@ use Source\Uploads\Uploader;
  *  - a strict write carries the version the caller named and never retries.
  *
  * Every write leaves through `send()`, which picks one of the server's two write
- * paths: one file streams as the body of `PUT .../files/{ref}/{path}` (api.md
- * 3.4.2), and anything else is one all-or-nothing `POST /commits`. The batch
+ * paths: one file streams as the body of `PUT .../files/{ref}/{path}`, and
+ * anything else is one all-or-nothing `POST /commits`. The batch
  * path asks the `Uploader` seam how each change's bytes travel; by default that
- * means uploading a missing blob to `POST /blobs` first and naming it by oid
- * (3.4.5), so a commit never carries a large file.
+ * means uploading a missing blob to `POST /blobs` first and naming it by oid,
+ * so a commit never carries a large file.
  *
  * History (`history`, `at`, `diff`, `revert`) and branches (`branch`,
  * `mergeInto`) are the extras that need more than the filesystem.
@@ -716,8 +716,8 @@ class SourceStore
     /**
      * The one place a write can leave, and the one place read-only bites.
      *
-     * One file (a put, a copy) streams as the body of a raw `PUT` (api.md
-     * 3.4.2). A delete, or more than one change, is one batch commit.
+     * One file (a put, a copy) streams as the body of a raw `PUT`. A delete,
+     * or more than one change, is one batch commit.
      *
      * @param  list<Change>  $changes
      * @param  array<string, mixed>  $meta

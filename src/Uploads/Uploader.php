@@ -14,9 +14,9 @@ use Source\Change;
  * holds. That decision lives here and nowhere else: `SourceStore` builds the
  * changes, calls `prepare()`, and posts the result unchanged.
  *
- * **Today** the implementation is `ParallelBlobUploads` (api.md 3.4.5). It
+ * **Today** the implementation is `ParallelBlobUploads`. It
  * hashes every put as a Git blob, asks `POST /objects/present` which ones the
- * repo holds (3.4.3), keeps puts under 64 KiB inline, uploads the rest to
+ * repo holds, keeps puts under 64 KiB inline, uploads the rest to
  * `POST /blobs` in parallel with adaptive concurrency, and returns those
  * changes as `{path, expected_oid, oid}`. A `422 unknown_object` on the commit
  * is answered by preparing again with those paths forced: their bytes are sent

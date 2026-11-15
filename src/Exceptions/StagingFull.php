@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace Source\Exceptions;
 
 /**
- * Uploaded-but-uncommitted bytes would exceed the staging cap (409
- * `staging_full`, api.md 3.4.5).
+ * Uploaded-but-uncommitted bytes would exceed the staging cap
+ * (409 `staging_full`).
  *
  * It is not a `429`: waiting a second does not help. It clears when commits
  * name the staged blobs or when they expire, so this is never retried.

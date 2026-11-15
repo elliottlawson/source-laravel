@@ -14,10 +14,10 @@ use Throwable;
 /**
  * The bytes of one file, ready to be streamed to the server.
  *
- * A raw file write (api.md 3.4.2) needs three things the caller's stream may
- * not offer: a known size (for `Content-Length`, which the server requires), a
+ * A raw file write needs three things the caller's stream may not offer: a
+ * known size (for `Content-Length`, which the server requires), a
  * rewindable body (a retry has to send the same bytes again) and a Git blob id
- * (to skip bytes the server already holds, api.md 3.4.3). This object provides
+ * (to skip bytes the server already holds). This object provides
  * all three without ever reading a stream into memory:
  *
  *  - a stream at its first byte is measured in place and streamed as it is;
@@ -190,7 +190,7 @@ final class Payload
 
     /**
      * Put the body back at its first byte, so a retried request sends the same
-     * bytes (api.md 3.4.2, a last-write-wins retry after 409 file_changed).
+     * bytes (a last-write-wins retry after 409 file_changed).
      */
     public function rewind(): void
     {

@@ -16,8 +16,8 @@ use Source\Support\Payload;
  *
  * Exactly one of `content`, `payload`, `oid` and `delete` says where the bytes
  * come from: `content` is a string in memory, `payload` is a stream (a
- * single-file write streams it to the server, api.md 3.4.2), `oid` names a blob
- * the repo already holds (api.md 3.4.3), and `delete` removes the file.
+ * single-file write streams it to the server), `oid` names a blob the repo
+ * already holds, and `delete` removes the file.
  */
 final readonly class Change
 {
@@ -95,10 +95,10 @@ final readonly class Change
     }
 
     /**
-     * The change as the API wants it (api.md 3.14).
+     * The change as the API wants it.
      *
      * A payload change has no place in a JSON body; it is only ever a
-     * single-file write, which streams (api.md 3.4.2). If one reaches a batch
+     * single-file write, which streams. If one reaches a batch
      * body after all, its bytes are inlined rather than silently dropped.
      *
      * @return array<string, mixed>

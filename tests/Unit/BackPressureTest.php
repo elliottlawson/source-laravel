@@ -6,7 +6,7 @@ use Source\Exceptions\UploadsBusy;
 use Source\Source;
 
 /*
- * api.md 3.4.4 from the disk's side: the transport waits out uploads_busy, and
+ * From the disk's side: the transport waits out uploads_busy, and
  * what escapes is the typed exception, not a Flysystem wrapper.
  */
 

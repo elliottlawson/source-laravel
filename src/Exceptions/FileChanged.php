@@ -80,7 +80,7 @@ class FileChanged extends SourceException implements Responsable
     }
 
     /**
-     * The 409 body, shaped like every other API error (api.md 2.1).
+     * The 409 body, shaped like every other API error.
      *
      * @return array<string, mixed>
      */

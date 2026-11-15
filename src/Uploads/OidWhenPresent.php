@@ -10,7 +10,7 @@ use Source\Http\Client;
 /**
  * Sends bytes only for the changes the repo does not already hold.
  *
- * api.md 3.4.3: hash each put the way Git does, ask `objects/present`, and name
+ * Hash each put the way Git does, ask `objects/present`, and name
  * a blob instead of carrying it. Re-committing identical content, or copying a
  * file the repo already has, then costs no bytes.
  *
@@ -18,9 +18,8 @@ use Source\Http\Client;
  * commit that names one may still be refused with `422 unknown_object`; the
  * driver answers that by preparing again with those paths forced inline.
  *
- * `ParallelBlobUploads` is the default now that `POST /blobs` exists (api.md
- * 3.4.5); this class remains for callers that would rather send every missing
- * file inline than make an upload request per file.
+ * `ParallelBlobUploads` is the default now that `POST /blobs` exists; this
+ * class remains for callers that would rather send every missing file inline than make an upload request per file.
  */
 final class OidWhenPresent implements Uploader
 {

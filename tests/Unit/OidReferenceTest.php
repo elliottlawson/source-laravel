@@ -13,7 +13,7 @@ use Source\Support\Payload;
 use Source\Uploads\OidWhenPresent;
 
 /*
- * api.md 3.4.3: a commit names a blob the repo already holds instead of sending
+ * A commit names a blob the repo already holds instead of sending
  * its bytes, and answers 422 unknown_object by sending them after all.
  */
 

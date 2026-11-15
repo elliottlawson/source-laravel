@@ -7,7 +7,7 @@ namespace Source\Uploads;
 use Source\Support\Payload;
 
 /**
- * One blob waiting for its own `POST .../blobs` (api.md 3.4.5).
+ * One blob waiting for its own `POST .../blobs`.
  *
  * `key` is only a correlation key inside one pooled wave (the commit path is
  * the natural one); the server never sees it. The payload is the body and is

@@ -9,7 +9,7 @@ use Source\Source;
 use Source\Support\Payload;
 
 /*
- * The fake server's side of api.md 3.4.5: staged uploads count as held only in
+ * The fake server's side of blob uploads: staged uploads count as held only in
  * their own repo, identical bytes are idempotent, expiry turns a commit into
  * unknown_object, and the two refusals are simulatable.
  */
@@ -47,7 +47,7 @@ it('refuses an oid change in another repo and after the grace period', function 
 
     $fake->uploadBlob('acme', 'workspace', Payload::from($contents), $oid);
 
-    // One repo only: the same oid in another repo is unknown (api.md 3.4.5).
+    // One repo only: the same oid in another repo is unknown.
     expect(fn () => $fake->sendChanges('acme', 'other', 'main', 'Elsewhere', null, [
         Change::reference('copy.bin', '', $oid),
     ]))->toThrow(UnknownObject::class);
