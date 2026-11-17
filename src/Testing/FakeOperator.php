@@ -6,8 +6,10 @@ namespace Source\Testing;
 
 use Carbon\CarbonImmutable;
 use PHPUnit\Framework\Assert as PHPUnit;
+use Source\Exceptions\Conflict;
 use Source\IssuedToken;
 use Source\Operator\OperatorClient;
+use Source\OperatorKey;
 
 /**
  * The operator half of Source::fake(): namespaces, repos and tokens in memory.
@@ -20,7 +22,7 @@ final class FakeOperator implements OperatorClient
     /** @var array<string, true> */
     private array $namespaces = [];
 
-    /** @var array<string, string> "ns/repo" => default branch */
+    /** @var array<string, array{branch: string, labels: array<string, string>}> "ns/repo" => repo metadata */
     private array $repos = [];
 
     /** @var array<string, IssuedToken> id => token */
@@ -28,6 +30,9 @@ final class FakeOperator implements OperatorClient
 
     /** @var array<string, true> */
     private array $revoked = [];
+
+    /** @var array<string, OperatorKey> id => key */
+    private array $operatorKeys = [];
 
     private int $ids = 0;
 
@@ -42,7 +47,7 @@ final class FakeOperator implements OperatorClient
         return true;
     }
 
-    public function ensureRepo(string $namespace, string $name, string $defaultBranch = 'main'): bool
+    public function ensureRepo(string $namespace, string $name, string $defaultBranch = 'main', array $labels = []): bool
     {
         $key = $namespace.'/'.$name;
 
@@ -51,9 +56,37 @@ final class FakeOperator implements OperatorClient
         }
 
         $this->namespaces[$namespace] = true;
-        $this->repos[$key] = $defaultBranch;
+        $this->repos[$key] = ['branch' => $defaultBranch, 'labels' => $labels];
 
         return true;
+    }
+
+    public function deleteNamespace(string $name, bool $force = false): void
+    {
+        if (! isset($this->namespaces[$name])) {
+            return;
+        }
+
+        $repos = array_values(array_filter(
+            array_keys($this->repos),
+            fn (string $key): bool => str_starts_with($key, $name.'/'),
+        ));
+
+        // The server answers 409 namespace_not_empty; the fake refuses the same
+        // way so a provisioning path that forgets force: true fails in tests.
+        if ($repos !== [] && ! $force) {
+            throw new Conflict(
+                "The namespace [{$name}] still has repos; pass force to delete them.",
+                'namespace_not_empty',
+                ['namespace' => $name, 'repos' => count($repos)],
+            );
+        }
+
+        unset($this->namespaces[$name]);
+
+        foreach ($repos as $key) {
+            unset($this->repos[$key]);
+        }
     }
 
     public function deleteRepo(string $namespace, string $name): void
@@ -80,9 +113,64 @@ final class FakeOperator implements OperatorClient
         $this->revoked[$id] = true;
     }
 
+    public function createOperatorKey(string $namespace, ?string $label = null): OperatorKey
+    {
+        $id = sprintf('key%023d', ++$this->ids);
+        $this->namespaces[$namespace] = true;
+
+        return $this->operatorKeys[$id] = new OperatorKey(
+            id: $id,
+            namespace: $namespace,
+            prefix: substr('asm_op_fake_'.$id, 0, 16),
+            origin: 'api',
+            label: $label,
+            createdAt: CarbonImmutable::now(),
+            revokedAt: null,
+            secret: 'asm_op_fake_'.$id.'_secret',
+        );
+    }
+
+    /**
+     * @return list<OperatorKey>
+     */
+    public function listOperatorKeys(): array
+    {
+        return array_values($this->operatorKeys);
+    }
+
+    public function revokeOperatorKey(string $id): void
+    {
+        $key = $this->operatorKeys[$id] ?? null;
+
+        if ($key === null) {
+            return;
+        }
+
+        $this->operatorKeys[$id] = new OperatorKey(
+            id: $key->id,
+            namespace: $key->namespace,
+            prefix: $key->prefix,
+            origin: $key->origin,
+            label: $key->label,
+            createdAt: $key->createdAt,
+            revokedAt: CarbonImmutable::now(),
+        );
+    }
+
+    public function operatorKey(string $id): ?OperatorKey
+    {
+        return $this->operatorKeys[$id] ?? null;
+    }
+
     public function hasRepo(string $namespace, string $name): bool
     {
         return isset($this->repos[$namespace.'/'.$name]);
+    }
+
+    /** @return array<string, string> */
+    public function repoLabels(string $namespace, string $name): array
+    {
+        return $this->repos[$namespace.'/'.$name]['labels'] ?? [];
     }
 
     public function hasNamespace(string $name): bool

@@ -10,9 +10,15 @@ use Illuminate\Support\Facades\Http;
 use InvalidArgumentException;
 use Source\Exceptions\SourceException;
 use Source\IssuedToken;
+use Source\OperatorKey;
 
 /**
  * The operator calls over Laravel's HTTP client (so Http::fake() works).
+ *
+ * The same client works with a namespace-scoped operator key. The one call it
+ * changes is ensureNamespace: a namespace-scoped key cannot create
+ * namespaces, so a refusal falls back to "does my namespace already exist?",
+ * which is the only namespace it can see.
  */
 final class HttpOperatorClient implements OperatorClient
 {
@@ -34,17 +40,50 @@ final class HttpOperatorClient implements OperatorClient
     {
         $response = $this->request()->asJson()->post($this->url('namespaces'), ['name' => $name]);
 
+        if ($response->status() === 403) {
+            // A namespace-scoped operator key cannot create a namespace, and it
+            // does not need to: its namespace already exists, or the key would
+            // not authenticate. Ask for the one namespace it can see. A 200
+            // there means provisioning is a no-op; anything else is the
+            // refusal the caller must see.
+            $existing = $this->request()->get($this->url('namespaces/'.rawurlencode($name)));
+
+            if ($existing->successful()) {
+                return false;
+            }
+
+            throw SourceException::fromResponse($response);
+        }
+
         return $this->created($response);
     }
 
-    public function ensureRepo(string $namespace, string $name, string $defaultBranch = 'main'): bool
+    public function ensureRepo(string $namespace, string $name, string $defaultBranch = 'main', array $labels = []): bool
     {
         $response = $this->request()->asJson()->post(
             $this->url('namespaces/'.rawurlencode($namespace).'/repos'),
-            ['name' => $name, 'default_branch' => $defaultBranch],
+            array_filter([
+                'name' => $name,
+                'default_branch' => $defaultBranch,
+                'labels' => $labels !== [] ? $labels : null,
+            ], fn (mixed $value): bool => $value !== null),
         );
 
         return $this->created($response);
+    }
+
+    public function deleteNamespace(string $name, bool $force = false): void
+    {
+        // The API reads force from the query string (api.md 3.1), not a body.
+        $path = 'namespaces/'.rawurlencode($name).($force ? '?force=true' : '');
+
+        $response = $this->request()->delete($this->url($path));
+
+        if ($response->status() === 404 || $response->status() === 410) {
+            return;
+        }
+
+        $this->ensureSuccess($response);
     }
 
     public function deleteRepo(string $namespace, string $name): void
@@ -82,6 +121,49 @@ final class HttpOperatorClient implements OperatorClient
     {
         $response = $this->request()->delete($this->url('tokens/'.rawurlencode($id)));
 
+        if ($response->status() === 404 || $response->status() === 410) {
+            return;
+        }
+
+        $this->ensureSuccess($response);
+    }
+
+    public function createOperatorKey(string $namespace, ?string $label = null): OperatorKey
+    {
+        $body = ['namespace' => $namespace];
+
+        if ($label !== null && $label !== '') {
+            $body['label'] = $label;
+        }
+
+        $response = $this->request()->asJson()->post($this->url('operator-keys'), $body);
+
+        $this->ensureSuccess($response);
+
+        return OperatorKey::fromArray((array) ($response->json('operator_key') ?? []));
+    }
+
+    /**
+     * @return list<OperatorKey>
+     */
+    public function listOperatorKeys(): array
+    {
+        $response = $this->request()->get($this->url('operator-keys'));
+
+        $this->ensureSuccess($response);
+
+        return array_values(array_map(
+            fn (array $key): OperatorKey => OperatorKey::fromArray($key),
+            (array) ($response->json('operator_keys') ?? []),
+        ));
+    }
+
+    public function revokeOperatorKey(string $id): void
+    {
+        $response = $this->request()->delete($this->url('operator-keys/'.rawurlencode($id)));
+
+        // Gone already: the key is revoked, which is what was asked. A 409 is
+        // a config-derived key, which the caller must hear about.
         if ($response->status() === 404 || $response->status() === 410) {
             return;
         }
