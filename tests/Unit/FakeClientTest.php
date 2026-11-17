@@ -9,7 +9,7 @@ use Source\Exceptions\UploadsBusy;
 use Source\Testing\FakeClient;
 
 it('uses real git blob ids', function () {
-    // The empty blob, as in api.md's batch-commit example.
+    // The empty blob, as in the batch-commit example.
     expect(FakeClient::oid(''))->toBe('e69de29bb2d1d6434b8b29ae775ad8c2e48c5391');
 });
 

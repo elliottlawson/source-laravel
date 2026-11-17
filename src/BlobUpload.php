@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Source;
 
 /**
- * The answer to `POST .../blobs` (api.md 3.4.5).
+ * The answer to `POST .../blobs`.
  *
  * `201` means these bytes were stored by this request; `200` means the repo
  * already held the blob (reachable from a ref, or uploaded earlier inside its

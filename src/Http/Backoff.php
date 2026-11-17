@@ -9,7 +9,7 @@ use Illuminate\Support\Sleep;
 use Source\Exceptions\RateLimited;
 
 /**
- * Waits out `429` and sends the same request again (api.md 3.4.4).
+ * Waits out `429` and sends the same request again.
  *
  * The server refuses a write it cannot fit, with `Retry-After`, rather than
  * queueing it. The client's part of that contract is to wait and retry the same
@@ -65,7 +65,7 @@ final class Backoff
      * Wait out a delay chosen elsewhere, with the same cap as a `429` retry.
      *
      * A parallel uploader has several refusals in one wave but waits once, for
-     * the largest `Retry-After` among them (api.md 3.4.4).
+     * the largest `Retry-After` among them.
      */
     public function pause(int $seconds): void
     {

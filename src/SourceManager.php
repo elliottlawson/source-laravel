@@ -60,7 +60,7 @@ class SourceManager
     }
 
     /**
-     * The batch-upload strategy for one disk (api.md 3.4.5).
+     * The batch-upload strategy for one disk.
      *
      * The defaults are the package's: files under 64 KiB stay inline, and the
      * upload concurrency starts at 4 and grows to 16. A disk can tune both.
@@ -263,8 +263,8 @@ class SourceManager
     }
 
     /**
-     * Assert that a commit named this path's blob instead of sending its bytes
-     * (api.md 3.4.3).
+     * Assert that a commit named this path's blob instead of sending its
+     * bytes.
      */
     public function assertReferenced(string $path): void
     {
@@ -275,8 +275,7 @@ class SourceManager
     }
 
     /**
-     * Assert that a path or blob id travelled as its own `POST /blobs`
-     * (api.md 3.4.5).
+     * Assert that a path or blob id travelled as its own `POST /blobs`.
      *
      * A path is looked up in the fake's tree, so assert after the commit that
      * wrote it; a 40-hex id is checked as is.

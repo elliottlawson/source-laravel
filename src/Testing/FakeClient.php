@@ -50,7 +50,7 @@ use Source\Uploads\PendingBlob;
  * the merge base, and otherwise takes the changed side, which is what an
  * ordinary three-way merge does.
  *
- * The two write forms of api.md 3.4.2 are both here: `putFile()` is the raw
+ * The two write forms are both here: `putFile()` is the raw
  * streamed PUT (it hashes the payload as Git does, counts the bytes as
  * uploaded, and honours `X-Source-Oid` and `Idempotency-Key` the way the server
  * does), `sendChanges()` is the batch commit with inline bytes or `oid`
@@ -60,7 +60,7 @@ use Source\Uploads\PendingBlob;
  * `422 unknown_object`, and `simulateBusy()` makes the next writes answer `429
  * uploads_busy` so the client's back-off can be tested.
  *
- * Blob uploads (api.md 3.4.5) follow the server too: `uploadBlob()` stores the
+ * Blob uploads follow the server too: `uploadBlob()` stores the
  * bytes without committing anything, identical bytes are idempotent, an upload
  * counts for one repo only, and it stops counting when its grace period ends
  * (`expireUploads()`). `simulateStagingFull()` answers `409 staging_full` and
@@ -290,7 +290,7 @@ final class FakeClient implements Client
      *
      * A change either carries bytes or names a blob; a named blob must be one
      * this repo holds, or the whole commit is refused with 422 unknown_object
-     * and nothing is written (api.md 3.4.3).
+     * and nothing is written.
      *
      * @param  list<Change>  $changes
      */
@@ -333,9 +333,9 @@ final class FakeClient implements Client
             );
         }
 
-        // A named blob must be one this repo holds (api.md 3.4.3): reachable
+        // A named blob must be one this repo holds: reachable
         // from a commit, or uploaded through /blobs and still inside its grace
-        // period (3.4.5). Nothing is written when any is unknown, and every
+        // period. Nothing is written when any is unknown, and every
         // refused path is listed.
         $repoName = $namespace.'/'.$repo;
         $held = $this->blobs[$repoName] ?? [];
@@ -396,7 +396,7 @@ final class FakeClient implements Client
         );
 
         // A commit has named these blobs: they are ordinary reachable objects
-        // now, and the grace period no longer applies (api.md 3.4.5).
+        // now, and the grace period no longer applies.
         foreach ($referenced as $oid) {
             unset($this->staged[$repoName][$oid]);
         }
@@ -419,7 +419,7 @@ final class FakeClient implements Client
     }
 
     /**
-     * The raw streamed write (api.md 3.4.2): the payload's bytes are the file.
+     * The raw streamed write: the payload's bytes are the file.
      *
      * The size and the Git blob id are computed from the payload exactly as the
      * server does, and the bytes are remembered as uploaded, so a test can tell
@@ -427,7 +427,7 @@ final class FakeClient implements Client
      * must hash to the oid the write declared, or the answer is `422
      * oid_mismatch` with nothing written.
      *
-     * An `Idempotency-Key` behaves as api.md 1.5 describes for a raw write: the
+     * An `Idempotency-Key` behaves as follows for a raw write: the
      * first success is stored with the request hash (the commit headers plus
      * the declared oid) and a repeat of that key and that request answers the
      * same result without committing again; the same key with a different
@@ -449,7 +449,7 @@ final class FakeClient implements Client
         $key = $idempotencyKey === null || $idempotencyKey === '' ? null : $idempotencyKey;
         $hash = $this->requestHash($path, $expectedOid, $message, $author, $mode, $payload->oid());
 
-        // The key is scoped to the token, the method and the path (api.md 1.5);
+        // The key is scoped to the token, the method and the path;
         // the fake has one token and one method, so the repo, the branch and the
         // path are what make it unique here.
         $slot = $key === null ? null : $this->key($namespace, $repo, $ref)."\0".$path."\0".$key;
@@ -516,7 +516,7 @@ final class FakeClient implements Client
     }
 
     /**
-     * The subset of blobs this repo holds (api.md 3.4.3).
+     * The subset of blobs this repo holds.
      *
      * The fake keeps every blob any of its commits wrote, which is the
      * reachable set it can answer from; the real server also excludes blobs no
@@ -561,7 +561,7 @@ final class FakeClient implements Client
     }
 
     /**
-     * One blob upload (api.md 3.4.5): bytes now, commit later.
+     * One blob upload: bytes now, commit later.
      *
      * Nothing is committed and no ref moves. Identical bytes are idempotent
      * (the same oid, nothing new stored, the grace period restarted); an upload
@@ -664,7 +664,7 @@ final class FakeClient implements Client
      *
      * The fake is the transport as well as the server, so it also owns the
      * client's bounded retry: a write made while busy is retried with the same
-     * request, which is what api.md 3.4.4 asks a client to do.
+     * request, which is what the server asks a client to do.
      */
     public function simulateBusy(int $times = 1, int $retryAfter = 1): static
     {
@@ -675,9 +675,9 @@ final class FakeClient implements Client
     }
 
     /**
-     * Answer the next `$times` blob uploads with 409 staging_full (api.md
-     * 3.4.5). A staging cap is a wait-for-commits-or-expiry condition, not a
-     * 429, so the client must not retry it.
+     * Answer the next `$times` blob uploads with 409 staging_full. A staging
+     * cap is a wait-for-commits-or-expiry condition, not a 429, so the client
+     * must not retry it.
      */
     public function simulateStagingFull(int $times = 1, string $scope = 'repo'): static
     {
@@ -694,7 +694,7 @@ final class FakeClient implements Client
      * The fake's own check cannot be reached otherwise: the declared oid comes
      * from the payload, so the bytes always match unless a test says they did
      * not. Nothing is written and the key is released, exactly as the server
-     * behaves (api.md 3.4.2).
+     * behaves.
      */
     public function simulateOidMismatch(int $times = 1): static
     {
@@ -1864,7 +1864,7 @@ final class FakeClient implements Client
     }
 
     /**
-     * Refuse one write attempt as 429 uploads_busy (api.md 3.4.4).
+     * Refuse one write attempt as 429 uploads_busy.
      */
     private function busyCheck(): void
     {
@@ -1893,7 +1893,7 @@ final class FakeClient implements Client
     }
 
     /**
-     * The request hash an `Idempotency-Key` is checked against (api.md 1.5).
+     * The request hash an `Idempotency-Key` is checked against.
      *
      * For a raw write it covers the commit headers and the blob's object id —
      * the oid the request declared — which is what lets the server settle a

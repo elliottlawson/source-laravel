@@ -5,8 +5,7 @@ declare(strict_types=1);
 namespace Source\Exceptions;
 
 /**
- * Uploaded bytes did not hash to the oid the client named (422 `oid_mismatch`,
- * api.md 3.4.5).
+ * Uploaded bytes did not hash to the oid the client named (422 `oid_mismatch`).
  *
  * Nothing was kept. It means the local Git hash is wrong or the stream changed
  * while it was being read, so sending the same bytes again cannot help; it is

@@ -3,6 +3,18 @@
     "description": "Laravel filesystem driver for source, the Git-backed file store.",
     "type": "library",
     "license": "MIT",
+    "keywords": [
+        "laravel",
+        "filesystem",
+        "flysystem",
+        "git",
+        "storage",
+        "versioning"
+    ],
+    "support": {
+        "source": "https://github.com/elliottlawson/source-laravel",
+        "issues": "https://github.com/elliottlawson/source-laravel/issues"
+    },
     "require": {
         "php": "^8.3",
         "illuminate/contracts": "^13.0",

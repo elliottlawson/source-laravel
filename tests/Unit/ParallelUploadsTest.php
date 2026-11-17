@@ -18,7 +18,7 @@ use Source\Uploads\AdaptiveConcurrency;
 use Source\Uploads\ParallelBlobUploads;
 
 /*
- * The controller around `POST /blobs` (api.md 3.4.5): which files upload, the
+ * The controller around `POST /blobs`: which files upload, the
  * waves and their adaptive concurrency, the `429` partial-wave retry, and the
  * two compatibility paths (unknown_object re-upload, a server older than the
  * endpoint).

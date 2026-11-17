@@ -19,8 +19,7 @@ use Throwable;
 /**
  * Uploads each change's bytes first, then names them by oid in one commit.
  *
- * This is the default `Uploader` and the implementation api.md 3.4.5
- * describes:
+ * This is the default `Uploader` and the implementation describes:
  *
  *  1. every put is hashed as a Git blob (`Payload`, so a stream is read once,
  *     never buffered) and `POST /objects/present` asks which blobs the repo
@@ -176,7 +175,7 @@ final class ParallelBlobUploads implements Uploader
     }
 
     /**
-     * Which of the candidate blobs the repo already holds (api.md 3.4.3).
+     * Which of the candidate blobs the repo already holds.
      *
      * Forced paths are left out: the whole point of the fallback is that the
      * hint was wrong for them.
@@ -211,7 +210,7 @@ final class ParallelBlobUploads implements Uploader
      * Upload the paths in waves, returning the ones that landed.
      *
      * The second element is false when the server has no `/blobs` route, which
-     * ends uploading for this client (api.md 3.4.5 predates it).
+     * ends uploading for this client.
      *
      * @param  list<string>  $paths
      * @param  array<string, string>  $oids
@@ -272,8 +271,8 @@ final class ParallelBlobUploads implements Uploader
                 }
 
                 // The router's 404: this server has no POST /blobs at all. Send
-                // every file inline from now on (api.md 3.4.5 is newer than the
-                // server), which is what the package did before it.
+                // every file inline from now on, which is what the package did
+                // before it.
                 if ($error instanceof NotFound && $error->resource() === 'path') {
                     return [[], false];
                 }
@@ -332,8 +331,8 @@ final class ParallelBlobUploads implements Uploader
     private function retryable(Throwable $error): bool
     {
         if (! $error instanceof SourceException) {
-            // A connection failure is not an API error (laravel-package.md
-            // "Errors"); the write never reached the server.
+            // A connection failure is not an API error; the write never reached
+            // the server.
             return true;
         }
 

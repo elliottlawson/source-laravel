@@ -127,7 +127,7 @@ and throws `FileChanged`, exactly as the server does.
 ## Uploads
 
 A single file is a stream: its bytes are the body of a raw
-`PUT .../files/{ref}/{path}` (api.md 3.4.2), never a JSON string. The body's Git
+`PUT .../files/{ref}/{path}`, never a JSON string. The body's Git
 blob id travels as `X-Source-Oid` and one `Idempotency-Key` goes with each
 attempt. Together they let the server settle a replay (`Idempotent-Replay:
 true`, which the driver reads as the first success), a stale version
@@ -135,7 +135,7 @@ true`, which the driver reads as the first success), a stale version
 is new for every attempt and reused by the transport across that attempt's own
 `429` retries; a re-read-and-rewrite after `file_changed` is a new attempt with
 a new key. A delete, or a commit with more than one change, takes a different
-path (api.md 3.4.5):
+path:
 
 1. every put is hashed as a Git blob, and `POST /objects/present` says which
    blobs the repo already holds (in chunks of 1000);
@@ -490,7 +490,7 @@ a message saying so.
 - A plain write costs one extra round trip (a HEAD for the current version)
   before its write.
 - One file is written as its own stream: the bytes are the body of a raw
-  `PUT /files/{ref}/{path}` (api.md 3.4.2), with the version in `If-Match` (or
+  `PUT /files/{ref}/{path}`, with the version in `If-Match` (or
   `If-None-Match: *`), the size in `Content-Length`, the message in
   `X-Source-Message`, the body's blob id in `X-Source-Oid` and one
   `Idempotency-Key` per attempt. A string, a resource and a PSR-7 stream all

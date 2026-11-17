@@ -5,7 +5,7 @@ declare(strict_types=1);
 use Source\Uploads\AdaptiveConcurrency;
 
 /*
- * api.md 3.4.4: the client lowers concurrency on a refusal and raises it again
+ * The client lowers concurrency on a refusal and raises it again
  * only when the server is keeping up. The rules are pure arithmetic, so they are
  * tested without a transport.
  */

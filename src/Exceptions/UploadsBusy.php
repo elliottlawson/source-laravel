@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Source\Exceptions;
 
 /**
- * Upload capacity is busy (429 uploads_busy, api.md 3.4.4).
+ * Upload capacity is busy (429 uploads_busy).
  *
  * A different condition from `rate_limited` (request counts), which extends the
  * same class because the client reacts the same way: wait `Retry-After`, then

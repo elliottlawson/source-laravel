@@ -7,7 +7,7 @@ namespace Source\Uploads;
 use InvalidArgumentException;
 
 /**
- * How many blob uploads one wave may have in flight (api.md 3.4.4/3.4.5).
+ * How many blob uploads one wave may have in flight.
  *
  * The server caps upload bytes and refuses what cannot fit with `429
  * uploads_busy`; the client's part is to slow down when that happens and to

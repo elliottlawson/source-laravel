@@ -8,7 +8,7 @@ use Source\Tests\Conformance\Backends;
 
 /*
  * A multi-file commit is one commit whose files travel as their own blob
- * uploads first (api.md 3.4.5). The same tests run against the fake and a live
+ * uploads first. The same tests run against the fake and a live
  * server; the live run is skipped unless the SOURCE_TEST_* variables are set.
  *
  * What can be asserted differs by backend. The fake exposes the wire: how many

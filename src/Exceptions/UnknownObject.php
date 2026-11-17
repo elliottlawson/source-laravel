@@ -5,8 +5,7 @@ declare(strict_types=1);
 namespace Source\Exceptions;
 
 /**
- * A change named a blob the repo does not hold (422 unknown_object, api.md
- * 3.4.3).
+ * A change named a blob the repo does not hold (422 unknown_object).
  *
  * Nothing was written. The client resends those paths' bytes and tries again,
  * which is what the driver does once before letting this escape.
