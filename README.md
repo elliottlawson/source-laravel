@@ -273,6 +273,7 @@ $operator = Source::operator([
 
 $operator->ensureNamespace('acme');            // true if created, false if it existed
 $operator->ensureRepo('acme', 'alice');        // the same
+$operator->ensureRepo('acme', 'bob', labels: ['workspace' => 'w-42', 'user' => 'u-7']);
 $token = $operator->mintToken('acme', 'alice', 'write', ['main'], ttl: 3600);
 $token->token;      // the secret, shown once
 $token->expiresAt;  // CarbonImmutable
@@ -284,13 +285,26 @@ $disk = Storage::build([
 
 $operator->revokeToken($token->id);
 $operator->deleteRepo('acme', 'alice');        // a missing repo is not an error
+$operator->deleteNamespace('acme');            // 409 namespace_not_empty while it has repos
+$operator->deleteNamespace('acme', force: true);  // deletes its repos too
 ```
+
+`labels` are application-owned identity metadata stored with the repo (`api.md`
+1.3): keys are `[a-z0-9][a-z0-9._-]{0,63}`, values are at most 255 characters of
+`[A-Za-z0-9._:@/+=-]`, and the same rules as a session's or checkout's labels
+apply. The server returns them on every repo read and replays them after a
+restore; there is no route that changes them afterwards, so a label is fixed at
+create. `deleteNamespace()` without `force` refuses a namespace that still has
+repos with `Conflict` (`namespace_not_empty`); a namespace that is already gone
+is not an error.
 
 Tokens last at most 24 hours (the server's cap), so cache one per repo for a
 little less than its TTL rather than minting per request. Under
 `Source::fake()`, `Source::operator()` returns an in-memory operator
-(`Source::fakeOperator()`, with `hasRepo()`, `tokens()` and
-`assertRepoCreated()`); it records tokens but does not enforce them.
+(`Source::fakeOperator()`, with `hasRepo()`, `repoLabels()`, `tokens()` and
+`assertRepoCreated()`); it records tokens but does not enforce them. The fake
+refuses `deleteNamespace()` on a non-empty namespace without `force`, the same
+way the server does.
 
 ### A namespace-scoped key
 
@@ -314,10 +328,10 @@ else: another namespace is `NotFound`, never a `Forbidden`, so a bug cannot
 prove another tenant exists. `ensureNamespace` is a no-op for the key's own
 namespace: the key cannot create namespaces, so the client asks whether the
 namespace it can see already exists and returns false when it does. Keys cannot
-be managed with a namespace-scoped key at all (`Forbidden`); `listOperatorKeys()`
-and `revokeOperatorKey()` need the instance-wide key. A config-derived key
-cannot be revoked over the API and `revokeOperatorKey()` throws `Conflict` with
-error code `operator_key_from_config`.
+be managed with a namespace-scoped key at all (`Forbidden`); `listOperatorKeys()`,
+`revokeOperatorKey()` and `deleteNamespace()` need the instance-wide key. A
+config-derived key cannot be revoked over the API and `revokeOperatorKey()`
+throws `Conflict` with error code `operator_key_from_config`.
 
 The live operator test runs with `SOURCE_TEST_URL` and
 `SOURCE_TEST_OPERATOR_KEY`; it creates a throwaway namespace.
