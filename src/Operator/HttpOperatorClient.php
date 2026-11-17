@@ -58,14 +58,32 @@ final class HttpOperatorClient implements OperatorClient
         return $this->created($response);
     }
 
-    public function ensureRepo(string $namespace, string $name, string $defaultBranch = 'main'): bool
+    public function ensureRepo(string $namespace, string $name, string $defaultBranch = 'main', array $labels = []): bool
     {
         $response = $this->request()->asJson()->post(
             $this->url('namespaces/'.rawurlencode($namespace).'/repos'),
-            ['name' => $name, 'default_branch' => $defaultBranch],
+            array_filter([
+                'name' => $name,
+                'default_branch' => $defaultBranch,
+                'labels' => $labels !== [] ? $labels : null,
+            ], fn (mixed $value): bool => $value !== null),
         );
 
         return $this->created($response);
+    }
+
+    public function deleteNamespace(string $name, bool $force = false): void
+    {
+        // The API reads force from the query string (api.md 3.1), not a body.
+        $path = 'namespaces/'.rawurlencode($name).($force ? '?force=true' : '');
+
+        $response = $this->request()->delete($this->url($path));
+
+        if ($response->status() === 404 || $response->status() === 410) {
+            return;
+        }
+
+        $this->ensureSuccess($response);
     }
 
     public function deleteRepo(string $namespace, string $name): void

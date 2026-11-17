@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Source\Exceptions\Conflict;
 use Source\Exceptions\Forbidden;
 use Source\Exceptions\NotFound;
 use Source\Exceptions\Unauthorized;
@@ -34,10 +35,8 @@ afterEach(function () {
         $this->operator->deleteRepo($this->namespace, 'one');
         $this->operator->deleteRepo($this->namespace, 'two');
 
-        // The operator client has no namespace delete, so remove the
-        // throwaway namespace directly; otherwise every run leaves one behind.
-        Http::withToken((string) env('SOURCE_TEST_OPERATOR_KEY'))
-            ->delete(rtrim($this->url, '/').'/v1/namespaces/'.rawurlencode($this->namespace).'?force=true');
+        // Force also covers a failed test that left an unexpected repo behind.
+        $this->operator->deleteNamespace($this->namespace, force: true);
     }
 });
 
@@ -52,9 +51,17 @@ function liveDisk(string $url, string $namespace, string $repo, string $token)
 it('provisions, mints, writes, reads by version and isolates repos live', function () {
     expect($this->operator->ensureNamespace($this->namespace))->toBeTrue()
         ->and($this->operator->ensureNamespace($this->namespace))->toBeFalse()
-        ->and($this->operator->ensureRepo($this->namespace, 'one'))->toBeTrue()
+        ->and($this->operator->ensureRepo($this->namespace, 'one', labels: ['suite' => 'operator-conformance', 'workspace' => 'w1']))->toBeTrue()
         ->and($this->operator->ensureRepo($this->namespace, 'one'))->toBeFalse()
         ->and($this->operator->ensureRepo($this->namespace, 'two'))->toBeTrue();
+
+    // The server stores the labels with the repo and returns them on every read.
+    $repo = Http::withToken((string) env('SOURCE_TEST_OPERATOR_KEY'))
+        ->get(rtrim($this->url, '/').'/v1/namespaces/'.rawurlencode($this->namespace).'/repos/one')
+        ->throw()
+        ->json('repo');
+
+    expect($repo['labels'])->toEqual(['suite' => 'operator-conformance', 'workspace' => 'w1']);
 
     $one = $this->operator->mintToken($this->namespace, 'one', 'write', ['main'], 600);
     $two = $this->operator->mintToken($this->namespace, 'two', 'write', ['main'], 600);
@@ -79,4 +86,15 @@ it('provisions, mints, writes, reads by version and isolates repos live', functi
     $this->operator->revokeToken($one->id);
     expect(fn () => liveDisk($this->url, $this->namespace, 'one', $one->token)->read('uploads/a.txt'))
         ->toThrow(Unauthorized::class);
+
+    // A non-empty namespace is refused without force; a missing one is not an error.
+    try {
+        $this->operator->deleteNamespace($this->namespace);
+        $this->fail('a non-empty namespace should be refused without force');
+    } catch (Conflict $exception) {
+        expect($exception->errorCode)->toBe('namespace_not_empty');
+    }
+
+    $this->operator->deleteNamespace($this->namespace, force: true);
+    $this->operator->deleteNamespace($this->namespace);
 });

@@ -39,7 +39,15 @@ interface OperatorClient
     /**
      * Create a repo unless it exists. True when this call created it.
      */
-    public function ensureRepo(string $namespace, string $name, string $defaultBranch = 'main'): bool;
+    public function ensureRepo(string $namespace, string $name, string $defaultBranch = 'main', array $labels = []): bool;
+
+    /**
+     * Delete a namespace. Requires an instance-wide operator key.
+     *
+     * A missing namespace is not an error. Force deletes its repositories too;
+     * without it, a non-empty namespace is refused with namespace_not_empty.
+     */
+    public function deleteNamespace(string $name, bool $force = false): void;
 
     /**
      * Delete a repo and everything in it. A missing repo is not an error.

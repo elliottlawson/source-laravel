@@ -6,6 +6,7 @@ namespace Source\Testing;
 
 use Carbon\CarbonImmutable;
 use PHPUnit\Framework\Assert as PHPUnit;
+use Source\Exceptions\Conflict;
 use Source\IssuedToken;
 use Source\Operator\OperatorClient;
 use Source\OperatorKey;
@@ -21,7 +22,7 @@ final class FakeOperator implements OperatorClient
     /** @var array<string, true> */
     private array $namespaces = [];
 
-    /** @var array<string, string> "ns/repo" => default branch */
+    /** @var array<string, array{branch: string, labels: array<string, string>}> "ns/repo" => repo metadata */
     private array $repos = [];
 
     /** @var array<string, IssuedToken> id => token */
@@ -46,7 +47,7 @@ final class FakeOperator implements OperatorClient
         return true;
     }
 
-    public function ensureRepo(string $namespace, string $name, string $defaultBranch = 'main'): bool
+    public function ensureRepo(string $namespace, string $name, string $defaultBranch = 'main', array $labels = []): bool
     {
         $key = $namespace.'/'.$name;
 
@@ -55,9 +56,37 @@ final class FakeOperator implements OperatorClient
         }
 
         $this->namespaces[$namespace] = true;
-        $this->repos[$key] = $defaultBranch;
+        $this->repos[$key] = ['branch' => $defaultBranch, 'labels' => $labels];
 
         return true;
+    }
+
+    public function deleteNamespace(string $name, bool $force = false): void
+    {
+        if (! isset($this->namespaces[$name])) {
+            return;
+        }
+
+        $repos = array_values(array_filter(
+            array_keys($this->repos),
+            fn (string $key): bool => str_starts_with($key, $name.'/'),
+        ));
+
+        // The server answers 409 namespace_not_empty; the fake refuses the same
+        // way so a provisioning path that forgets force: true fails in tests.
+        if ($repos !== [] && ! $force) {
+            throw new Conflict(
+                "The namespace [{$name}] still has repos; pass force to delete them.",
+                'namespace_not_empty',
+                ['namespace' => $name, 'repos' => count($repos)],
+            );
+        }
+
+        unset($this->namespaces[$name]);
+
+        foreach ($repos as $key) {
+            unset($this->repos[$key]);
+        }
     }
 
     public function deleteRepo(string $namespace, string $name): void
@@ -136,6 +165,12 @@ final class FakeOperator implements OperatorClient
     public function hasRepo(string $namespace, string $name): bool
     {
         return isset($this->repos[$namespace.'/'.$name]);
+    }
+
+    /** @return array<string, string> */
+    public function repoLabels(string $namespace, string $name): array
+    {
+        return $this->repos[$namespace.'/'.$name]['labels'] ?? [];
     }
 
     public function hasNamespace(string $name): bool
